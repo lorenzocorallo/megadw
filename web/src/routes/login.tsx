@@ -1,11 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import { APIError, setupAdmin } from "@/api/client";
+import { APIError, login } from "@/api/client";
 
-function SetupPage() {
+function LoginPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -13,7 +12,7 @@ function SetupPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const mutation = useMutation({
-    mutationFn: () => setupAdmin(username, password),
+    mutationFn: () => login(username, password),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
       void navigate({ to: "/" });
@@ -23,8 +22,8 @@ function SetupPage() {
   });
   return (
     <section className="mx-auto mt-10 w-full max-w-md rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-      <h1 className="text-2xl font-semibold text-slate-100">{t("pages.setup.title")}</h1>
-      <p className="mt-2 text-sm text-slate-400">{t("pages.setup.description")}</p>
+      <h1 className="text-2xl font-semibold text-slate-100">{t("auth.loginTitle")}</h1>
+      <p className="mt-2 text-sm text-slate-400">{t("auth.loginDescription")}</p>
       <form
         className="mt-6 space-y-4"
         onSubmit={(event) => {
@@ -47,7 +46,7 @@ function SetupPage() {
           <input
             className={inputClass}
             type="password"
-            autoComplete="new-password"
+            autoComplete="current-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
@@ -58,7 +57,7 @@ function SetupPage() {
           </p>
         ) : null}
         <button className={buttonClass} disabled={mutation.isPending} type="submit">
-          {mutation.isPending ? t("auth.creating") : t("auth.createAdmin")}
+          {mutation.isPending ? t("auth.signingIn") : t("auth.login")}
         </button>
       </form>
     </section>
@@ -70,4 +69,4 @@ const inputClass =
 const buttonClass =
   "w-full rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-50";
 
-export const Route = createFileRoute("/setup")({ component: SetupPage });
+export const Route = createFileRoute("/login")({ component: LoginPage });

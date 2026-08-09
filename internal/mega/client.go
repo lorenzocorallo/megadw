@@ -68,6 +68,35 @@ func NewClient(httpClient *http.Client, apiBaseURL string) *Client {
 	return client
 }
 
+// FetchPayloadRange performs one bounded request against an already resolved
+// MEGA payload URL. Payload URLs are opaque and may contain secrets, so the
+// URL is never included in an error message or log field here.
+func (c *Client) FetchPayloadRange(ctx context.Context, payloadURL string, start, end int64) (*http.Response, error) {
+	if c == nil || c.httpClient == nil {
+		return nil, fmt.Errorf("MEGA HTTP client is unavailable")
+	}
+	if payloadURL == "" || start < 0 || end < start {
+		return nil, fmt.Errorf("invalid MEGA payload range")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, payloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create MEGA payload request: %w", err)
+	}
+	request.Header.Set("Range", "bytes="+strconv.FormatInt(start, 10)+"-"+strconv.FormatInt(end, 10))
+	request.Header.Set("Accept", "application/octet-stream")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// net/http includes the full request URL in some transport errors. A
+		// payload URL is encrypted at rest and must not escape through a
+		// persisted diagnostic string.
+		return nil, fmt.Errorf("MEGA payload request failed")
+	}
+	return response, nil
+}
+
 // ResolveLink resolves a public file or folder link. accountID is accepted for
 // the stable future-facing contract but is intentionally unused in this
 // anonymous protocol spike; authenticated account plumbing belongs to Phase F.

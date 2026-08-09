@@ -1,6 +1,6 @@
 # MEGA Downloader
 
-MEGA Downloader is a single-process Go application with a client-rendered React web interface. The repository is being implemented phase by phase from [PLAN.md](PLAN.md); the current tree contains the Phase B public-link protocol/crypto spike and an embedded blank shell.
+MEGA Downloader is a single-process Go application with a client-rendered React web interface. The repository is being implemented phase by phase from [PLAN.md](PLAN.md); the current tree contains the Phase D persistence-backed single-worker transfer core on top of the Phase C authentication, settings, filesystem confinement, and Phase B public-link protocol surface.
 
 ## Toolchain
 
@@ -41,6 +41,10 @@ The production build places the Go binary at `dist/megad`. It serves the fronten
 ```
 
 The production process does not require Node.js or Java.
+
+On first launch, open the application at `/setup` and create the single local administrator account. The account session is held in an HttpOnly SameSite cookie; passwords, public-link keys, payload locations, and other transfer secrets are encrypted or hashed at rest. The browser can resolve a public MEGA link and add its metadata to the queue without fetching payload bytes.
+
+Downloads use one job-scoped sparse `.mega.part` file per remote file. Completed files are integrity-checked and atomically renamed into the complete root; a restart rehydrates the persisted segment bitmap and resumes unfinished ranges.
 
 ## License
 

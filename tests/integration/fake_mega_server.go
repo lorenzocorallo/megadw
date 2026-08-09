@@ -32,6 +32,7 @@ const (
 // value produces a healthy server; CorruptByteAt is used only when
 // CorruptPayload is true.
 type FakeMegaServerOptions struct {
+	PayloadSize           int
 	Delay                 time.Duration
 	ResetAfterBytes       int
 	MalformedContentRange bool
@@ -95,6 +96,12 @@ func (f *FakeMegaServer) HTTPClient() *http.Client {
 	return f.server.Client()
 }
 
+// APIBaseURL returns the local command endpoint base for application-level
+// resolver tests that construct their own service composition.
+func (f *FakeMegaServer) APIBaseURL() string {
+	return f.server.URL
+}
+
 // FileLink returns the modern public file URL for the deterministic fixture.
 func (f *FakeMegaServer) FileLink() string {
 	return "https://mega.nz/file/" + fakeFileHandle + "#" + f.fileLink
@@ -135,13 +142,18 @@ func (f *FakeMegaServer) SetOptions(options FakeMegaServerOptions) {
 }
 
 func (f *FakeMegaServer) initializeData() {
+	options := f.getOptions()
 	masterRaw := mustHex("0102030405060708090a0b0c0d0e0f10")
 	rootRaw := mustHex("2122232425262728292a2b2c2d2e2f30")
 	nestedRaw := mustHex("1112131415161718191a1b1c1d1e1f20")
 	f.masterKey = mustNodeKey(masterRaw)
 	f.rootKey = mustNodeKey(rootRaw)
 	f.nestedKey = mustNodeKey(nestedRaw)
-	f.plaintext = make([]byte, 300_123)
+	payloadSize := options.PayloadSize
+	if payloadSize <= 0 {
+		payloadSize = 300_123
+	}
+	f.plaintext = make([]byte, payloadSize)
 	for index := range f.plaintext {
 		f.plaintext[index] = byte((index*29 + index/17 + 7) & 0xff)
 	}

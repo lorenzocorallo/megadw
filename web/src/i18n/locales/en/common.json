@@ -11,32 +11,49 @@
   },
   "shell": {
     "mainRegion": "Application content",
-    "version": "Phase A · repository bootstrap"
+    "version": "Phase C · secure local control plane"
+  },
+  "common": {
+    "loading": "Loading…"
+  },
+  "auth": {
+    "username": "Username",
+    "password": "Password",
+    "createAdmin": "Create administrator",
+    "creating": "Creating…",
+    "login": "Sign in",
+    "loginTitle": "Sign in",
+    "loginDescription": "Use the local administrator account to continue.",
+    "signingIn": "Signing in…",
+    "logout": "Sign out"
+  },
+  "errors": {
+    "requestFailed": "The request could not be completed."
   },
   "pages": {
     "dashboard": {
       "title": "Dashboard",
-      "description": "Your download queue will appear here."
+      "description": "Resolve a MEGA link and place it in the durable download queue."
     },
     "downloads": {
       "title": "Downloads",
-      "description": "Download management is ready for the next phase."
+      "description": "Download management will be connected in the transfer phase."
     },
     "downloadDetail": {
       "title": "Download detail",
-      "description": "Download details will be available once transfer state is connected."
+      "description": "Transfer details will be available once the worker is connected."
     },
     "settings": {
       "title": "Settings",
-      "description": "Application preferences will be available once persistence is connected."
+      "description": "Settings are validated as one atomic backend document."
     },
     "general": {
       "title": "General settings",
-      "description": "General settings will be available in a later phase."
+      "description": "Choose the controlled roots and default queue behavior."
     },
     "downloadSettings": {
       "title": "Download settings",
-      "description": "Download settings will be available in a later phase."
+      "description": "Tune bounded segment and retry settings for future workers."
     },
     "accounts": {
       "title": "Accounts",
@@ -48,11 +65,89 @@
     },
     "appearance": {
       "title": "Appearance",
-      "description": "Appearance preferences will be available in a later phase."
+      "description": "Choose the local interface theme and language."
     },
     "setup": {
-      "title": "Welcome",
-      "description": "The first-run administrator setup will be available in a later phase."
+      "title": "Create your administrator account",
+      "description": "This account protects the local control plane and its encrypted secrets."
     }
+  },
+  "dashboard": {
+    "activeJobs": "Active jobs",
+    "queuedJobs": "Queued jobs",
+    "waitingQuota": "Waiting for quota",
+    "currentQueue": "Current queue",
+    "emptyQueue": "No downloads have been added yet."
+  },
+  "downloads": {
+    "name": "Name",
+    "status": "Status",
+    "unknownStatus": "Unknown status"
+  },
+  "download": {
+    "add": "Add download",
+    "addDescription": "Resolve metadata first; payload bytes are not fetched during this step.",
+    "account": "Account",
+    "anonymous": "Anonymous",
+    "proxy": "Proxy",
+    "direct": "Direct",
+    "megaURL": "MEGA URL",
+    "megaURLPlaceholder": "https://mega.nz/file/…#…",
+    "destinationSubdirectory": "Destination subdirectory",
+    "destinationPlaceholder": "Optional folder under the complete root",
+    "startImmediately": "Start immediately",
+    "resolve": "Resolve",
+    "resolving": "Resolving…",
+    "adding": "Adding…",
+    "addDownload": "Add download",
+    "added": "Download added to the queue.",
+    "metadata": "{{kind}} · {{files}} file(s) · {{size}}",
+    "kind": {
+      "file": "File",
+      "folder": "Folder"
+    },
+    "status": {
+      "ready": "Ready",
+      "queued": "Queued",
+      "downloading": "Downloading",
+      "waiting_quota": "Waiting for quota",
+      "paused": "Paused",
+      "completed": "Completed",
+      "failed": "Failed"
+    }
+  },
+  "settings": {
+    "completeRoot": "Complete root",
+    "incompleteRoot": "Incomplete root",
+    "conflictPolicy": "Conflict policy",
+    "conflict": {
+      "rename": "Rename with a numeric suffix",
+      "overwrite": "Overwrite existing files",
+      "fail": "Fail when a file exists"
+    },
+    "autoStart": "Start downloads automatically",
+    "segmentSizeBytes": "Segment size (bytes)",
+    "workersPerFile": "Workers per file",
+    "maxActiveFiles": "Maximum active files",
+    "maxGlobalWorkers": "Maximum global workers",
+    "globalSpeedLimit": "Global speed limit (bytes/s)",
+    "checkpointInterval": "Checkpoint interval (ms)",
+    "normalRetryLimit": "Normal retry limit",
+    "theme": "Theme",
+    "themeSystem": "System",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "language": "Language",
+    "english": "English",
+    "save": "Save settings",
+    "saving": "Saving…",
+    "saved": "Settings saved."
+  },
+  "units": {
+    "bytes": "B",
+    "kibibytes": "KiB",
+    "mebibytes": "MiB",
+    "gibibytes": "GiB",
+    "tebibytes": "TiB"
   }
 }

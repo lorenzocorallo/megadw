@@ -39,6 +39,7 @@ test: web-test backend-test
 
 build: web-build
 	mkdir -p $(EMBED_DIR) $(OUTPUT_DIR)
+	rm -rf $(EMBED_DIR)/*
 	cp -R $(WEB_DIR)/dist/. $(EMBED_DIR)/
 	$(GO) build -trimpath -o $(OUTPUT_BINARY) ./cmd/megad
 

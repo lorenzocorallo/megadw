@@ -39,6 +39,13 @@ func DecodeFileKey(encoded string) (FileKey, error) {
 	return decodeFileKeyBytes(decoded)
 }
 
+// DecodeFileKeyBytes decodes raw key bytes recovered from encrypted local
+// storage. It is intentionally separate from DecodeFileKey so callers do not
+// need to base64-encode secret material merely to use the transfer engine.
+func DecodeFileKeyBytes(decoded []byte) (FileKey, error) {
+	return decodeFileKeyBytes(decoded)
+}
+
 func decodeFileKeyBytes(decoded []byte) (FileKey, error) {
 	if len(decoded) != 32 {
 		return FileKey{}, fmt.Errorf("%w: file key must contain 32 bytes, got %d", ErrInvalidKey, len(decoded))

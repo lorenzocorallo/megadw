@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+          check-latest: true
+      - name: Test backend
+        run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install npm 12
+        run: npm install --global npm@12.0.2
+      - name: Install Vite+
+        run: npm install --global vite-plus@0.2.6
+      - name: Install frozen dependencies
+        run: vp install --frozen-lockfile
+      - name: Check frontend
+        run: vp check
+      - name: Test frontend
+        run: vp test
+      - name: Build frontend
+        run: vp build

@@ -1,0 +1,14 @@
+# Build output
+/dist/
+/web/dist/
+/internal/webui/dist/*
+!/internal/webui/dist/index.html
+
+# Frontend dependencies and generated files
+/web/node_modules/
+/web/node_modules/.tmp/
+
+# Local tool and editor state
+.DS_Store
+.idea/
+.vscode/

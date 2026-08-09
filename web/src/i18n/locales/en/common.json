@@ -1,0 +1,58 @@
+{
+  "app": {
+    "name": "MEGA Downloader",
+    "tagline": "A dependable home for your downloads"
+  },
+  "nav": {
+    "navigation": "Primary navigation",
+    "dashboard": "Dashboard",
+    "downloads": "Downloads",
+    "settings": "Settings"
+  },
+  "shell": {
+    "mainRegion": "Application content",
+    "version": "Phase A · repository bootstrap"
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Dashboard",
+      "description": "Your download queue will appear here."
+    },
+    "downloads": {
+      "title": "Downloads",
+      "description": "Download management is ready for the next phase."
+    },
+    "downloadDetail": {
+      "title": "Download detail",
+      "description": "Download details will be available once transfer state is connected."
+    },
+    "settings": {
+      "title": "Settings",
+      "description": "Application preferences will be available once persistence is connected."
+    },
+    "general": {
+      "title": "General settings",
+      "description": "General settings will be available in a later phase."
+    },
+    "downloadSettings": {
+      "title": "Download settings",
+      "description": "Download settings will be available in a later phase."
+    },
+    "accounts": {
+      "title": "Accounts",
+      "description": "MEGA account management will be available in a later phase."
+    },
+    "proxies": {
+      "title": "Proxies",
+      "description": "Explicit proxy profiles will be available in a later phase."
+    },
+    "appearance": {
+      "title": "Appearance",
+      "description": "Appearance preferences will be available in a later phase."
+    },
+    "setup": {
+      "title": "Welcome",
+      "description": "The first-run administrator setup will be available in a later phase."
+    }
+  }
+}

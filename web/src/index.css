@@ -1,0 +1,22 @@
+@import "@fontsource-variable/geist";
+@import "tailwindcss";
+
+:root {
+  font-family: Geist, ui-sans-serif, system-ui, sans-serif;
+  color: #e2e8f0;
+  background: #020617;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+a {
+  font: inherit;
+}

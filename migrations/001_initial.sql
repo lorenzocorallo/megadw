@@ -1,0 +1,2 @@
+-- Phase A migration placeholder.
+-- The SQLite schema and migration runner are implemented in Phase C.

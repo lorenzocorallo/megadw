@@ -107,5 +107,5 @@ commands.
 
 ## License
 
-GPL-3.0-only. See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and
+MIT. See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

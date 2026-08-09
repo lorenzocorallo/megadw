@@ -1,6 +1,6 @@
 # Development Plan - megadw (Go + React)
 
-Status: implementation-ready MVP plan, revised 2026-08-08
+Status: implementation-ready MVP plan, revised 2026-08-11
 Primary scope: high-performance MEGA downloading only
 Out of scope for this plan: upload, streaming, *arr integration, cloud file browser
 Deployment target: Docker/Compose first; native Linux binary + systemd second; LXC/Proxmox optional
@@ -28,7 +28,7 @@ The implementation agents MUST follow these decisions. Do not substitute librari
 14. Logging: Go `log/slog`; human-readable text to stdout for systemd/journald. Do not store verbose progress logs in SQLite.
 15. Packaging: one Go binary containing the built React assets with `go:embed`.
 16. Deployment: Docker/Compose is the primary production deployment. A native Linux binary with systemd remains the supported secondary deployment. LXC/Proxmox is only an optional host environment; it is not an application or filesystem assumption.
-17. License: GPL-3.0 for the initial repository because MegaBasterd is GPL-3.0 and this project is explicitly a port/reference implementation. Keep third-party license notices. If a different license is desired later, perform a deliberate clean-room review first.
+17. License: MIT. Keep third-party copyright and license notices and complete the existing release-time license gate. This is an independent implementation: GPL-licensed source may inform observable behavior research but MUST NOT be copied, translated, or adapted.
 18. MEGA transfer limits: the application MUST be quota-aware and resume reliably after MEGA permits transfers again. It MUST NOT automatically rotate IPs, proxy identities, or accounts in response to quota errors for the purpose of bypassing MEGA transfer limits. Proxy support is for explicit network routing. HTTP 509 / over-quota states cause pause/backoff/retry, not identity rotation.
 19. Storage paths:
     - incomplete and complete transfer roots: no defaults; both must be explicitly configured as valid absolute paths before transfers are enabled;
@@ -46,11 +46,11 @@ The implementation agents MUST follow these decisions. Do not substitute librari
 
 ## 1. Why this architecture
 
-MegaBasterd provides the behavioral reference for the downloader: public MEGA links, account support, parallel chunk downloading, resume, retry logic, SQLite-backed state, proxy support, and explicit handling of quota-related HTTP 509 conditions. Do not port the Swing UI.
+The architecture is based on the product requirements and independently tested MEGA interoperability behavior: public links, account support, parallel chunk downloading, resume, retry logic, SQLite-backed state, proxy support, and explicit handling of quota-related HTTP 509 conditions.
 
 The existing Go library `github.com/t3rm1n4l/go-mega` is useful as a protocol and crypto foundation for authenticated account/tree/file operations and tested primitives. Do NOT assume it supplies the complete modern public-file/public-folder link flow. The application needs its own validated public-link resolver, payload-URL acquisition path where required, resumable range scheduler, persistence model, proxy-aware HTTP transports, progress events, and low-disk-overhead writer.
 
-Use MegaBasterd as a behavioral/protocol reference and `go-mega` as a preferred source of reusable Go primitives only where project tests prove compatibility. Phase B below is a mandatory public-link/crypto compatibility spike; if it fails, fix or locally implement the smallest required protocol surface before continuing. Do not wrap or launch the Java application.
+Use `go-mega` as a preferred, MIT-licensed source of reusable Go primitives only where project tests prove compatibility. Phase B below is a mandatory public-link/crypto compatibility spike; if it fails, fix or independently implement the smallest required protocol surface before continuing. Do not copy, translate, wrap, or launch GPL-licensed implementations.
 
 ## 2. Repository layout
 
@@ -174,26 +174,26 @@ Create these package boundaries. The named top-level and `internal/` packages ar
 
 Generated files may add to this tree. Keep the major package boundaries stable, but agents may refactor filenames inside a package when tests and imports remain coherent.
 
-## 3. Java-to-Go port map
+## 3. Behavior-to-package map
 
-Agents port behavior, not class structure. Use this map to avoid architectural improvisation:
+Use this project-owned map to keep implementation boundaries stable. It is not a
+source-code porting guide; implementation must be written independently:
 
-| MegaBasterd source | Go destination | Rule |
+| Behavior | Go destination | Rule |
 |---|---|---|
-| `MegaAPI.java` | `internal/mega/client.go`, `metadata.go`, `accounts.go` | Port only APIs needed for download/link/account resolution. |
-| `CryptTools.java` | `internal/mega/crypto.go`, `integrity.go` | Reuse tested MIT-licensed go-mega primitives when possible. Add deterministic test vectors. |
-| `HashcashSolver.java` | `internal/mega/hashcash.go` | Implement only if the current MEGA API flow requires it. Prefer working go-mega implementation. |
-| `DownloadManager.java` | `internal/download/manager.go`, `scheduler.go` | Global queue and concurrency ownership. |
-| `Download.java` | `internal/download/job.go`, `file.go` | State machine and per-file lifecycle. |
-| `ChunkDownloader.java` | `internal/download/worker.go` | HTTP range worker. |
-| `ChunkDownloaderMono.java` | same worker with concurrency=1 | Do not create a separate implementation. |
-| `ChunkWriterManager.java` | `internal/download/writer.go` | Replace temp-chunk merge design with direct `WriteAt` into one partial file. |
-| `SmartMegaProxyManager.java` | `internal/network/proxy.go` | Port explicit proxy routing/health only. Do not port quota-evasion identity rotation. |
-| `DBTools.java`, `SqliteSingleton.java` | `internal/store/*` | Typed repositories and migrations. |
-| `AccountStore.java` | `internal/store/accounts.go`, `mega/accounts.go` | Encrypt credentials/session material at rest. |
-| Swing UI classes | `web/` | Do not port. Rebuild as web UI. |
-| Upload classes | deferred | See `PLAN-UPLOAD.md`. |
-| Stream classes | deferred | See `PLAN-STREAMING.md`. |
+| Download/link/account protocol | `internal/mega/client.go`, `metadata.go`, `accounts.go` | Implement only APIs needed for download/link/account resolution. |
+| Protocol cryptography and integrity | `internal/mega/crypto.go`, `integrity.go` | Reuse tested, compatibly licensed primitives when possible. Add deterministic test vectors. |
+| Hashcash | `internal/mega/hashcash.go` | Implement only if the current MEGA API flow requires it. Prefer a working MIT-licensed `go-mega` implementation. |
+| Global queue and concurrency | `internal/download/manager.go`, `scheduler.go` | One owner for queueing and concurrency. |
+| Download state and lifecycle | `internal/download/job.go`, `file.go` | State machine and per-file lifecycle. |
+| Ranged transfer | `internal/download/worker.go` | One HTTP range worker implementation; concurrency=1 uses the same worker. |
+| Partial-file writes | `internal/download/writer.go` | Direct `WriteAt` into one partial file; no temp-chunk merge design. |
+| Explicit proxy routing and health | `internal/network/proxy.go` | Do not implement quota-evasion identity rotation. |
+| Persistence | `internal/store/*` | Typed repositories and migrations. |
+| Account secret storage | `internal/store/accounts.go`, `mega/accounts.go` | Encrypt credentials/session material at rest. |
+| Web interface | `web/` | Build a project-owned web UI. |
+| Upload behavior | deferred | See `PLAN-UPLOAD.md`. |
+| Stream behavior | deferred | See `PLAN-STREAMING.md`. |
 
 ## 3.1 Required Go dependencies
 
@@ -538,7 +538,7 @@ Always checkpoint on pause, graceful shutdown, and before final verification.
 
 Integrity verification is mandatory before atomic completion.
 
-Implement MEGA file integrity verification in `internal/mega/integrity.go` using tested protocol-compatible crypto primitives. Prefer a tested implementation from `go-mega` where possible. If behavior is ported from GPL MegaBasterd code, keep GPL licensing and attribution.
+Implement MEGA file integrity verification in `internal/mega/integrity.go` using tested protocol-compatible crypto primitives. Prefer a tested implementation from MIT-licensed `go-mega` where possible. Do not copy or translate GPL-licensed source; use independently derived protocol tests and interoperable behavior.
 
 Tests MUST include deterministic known vectors for:
 
@@ -1390,7 +1390,7 @@ Agents MUST implement in this order. A phase is complete only when its gate pass
 Tasks:
 
 - create repository/package layout;
-- add GPL-3.0 license and NOTICE;
+- add MIT license and NOTICE;
 - initialize Go module;
 - initialize Vite+ React + TypeScript 7 app;
 - configure TanStack Router, Tailwind, shadcn, Query, i18n;
@@ -1616,7 +1616,7 @@ The MVP is DONE only when every item is true:
 - [ ] Playwright suite passes.
 - [ ] Resource envelope is measured on both 2-vCPU/4-GiB and 4-vCPU/8-GiB profiles and documented in README.
 - [ ] A release-time live public-MEGA compatibility smoke test passes.
-- [ ] GPL/third-party notices are present.
+- [ ] MIT and all applicable third-party notices are present in release artifacts.
 
 ## 29. Explicitly deferred
 

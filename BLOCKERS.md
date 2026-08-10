@@ -26,7 +26,7 @@ same-name job tests continue to pass, including the race detector.
 
 Status: resolved; no known filesystem-confinement release blocker remains.
 
-## Account login leaks an unowned MEGA event-polling client
+## Account authentication lifecycle (resolved 2026-08-10)
 
 ### Failing assumption
 
@@ -88,3 +88,21 @@ sessions, fall back once to the encrypted password on an authentication-only
 failure, persist the replacement session, and add deterministic fake-MEGA
 tests proving bounded goroutine/transport lifecycle and graceful shutdown.
 Do not enable account or proxy rotation as part of this correction.
+
+### Resolution
+
+The production account path now uses the project-owned authentication-only
+protocol in `internal/mega`: `us0`/`us` for supported account versions 1 and 2,
+the required bounded hashcash challenge, and `uq` for session validation and
+health. It does not invoke the upstream full-client login or retain a master
+key. Encrypted credentials and session material remain behind the existing
+secret store; a rejected session gets one password fallback, and successful
+reauthentication atomically replaces the encrypted session. A rejected
+session without reusable credentials becomes `requires_auth`.
+
+Deterministic fake-MEGA tests cover password authentication, both derivations,
+hashcash, restore/expiry/reauthentication, proxy routing, cancellation,
+resource cleanup, shutdown, and the absence of filesystem/event commands.
+`go test -race ./... -count=1`, the Phase F suite, release security checks,
+resource benchmarks, graceful-shutdown smoke, and embedded-binary browser
+smoke pass.

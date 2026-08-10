@@ -37,8 +37,8 @@ func (d *DB) InsertMegaAccount(ctx context.Context, input MegaAccountInput, now 
 			return MegaAccountRecord{}, err
 		}
 	}
-	if input.Label == "" || input.Email == "" || len(input.CredentialCiphertext) == 0 {
-		return MegaAccountRecord{}, fmt.Errorf("account label, email, and credential are required")
+	if input.Label == "" || input.Email == "" || (len(input.CredentialCiphertext) == 0 && len(input.SessionCiphertext) == 0) {
+		return MegaAccountRecord{}, fmt.Errorf("account label, email, and session or credential is required")
 	}
 	if input.Status == "" {
 		input.Status = "unknown"
@@ -160,6 +160,33 @@ func (d *DB) MarkMegaAccountChecked(ctx context.Context, id, status string, now 
 	}
 	return nil
 }
+
+// ReplaceMegaAccountSession atomically replaces only the encrypted session
+// material and account health state. A nil session explicitly clears known
+// rejected material while preserving the encrypted credential for a future
+// controlled reauthentication.
+func (d *DB) ReplaceMegaAccountSession(ctx context.Context, id string, sessionCiphertext []byte, status string, now time.Time) error {
+	when := now.UTC()
+	if when.IsZero() {
+		when = time.Now().UTC()
+	}
+	var value any
+	if len(sessionCiphertext) > 0 {
+		value = sessionCiphertext
+	}
+	return d.WithTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE mega_accounts SET session_ciphertext=?,status=?,last_checked_at=?,updated_at=? WHERE id=?`, value, status, when.Format(time.RFC3339Nano), when.Format(time.RFC3339Nano), id)
+		if err != nil {
+			return err
+		}
+		affected, _ := result.RowsAffected()
+		if affected != 1 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
 func (d *DB) DeleteMegaAccount(ctx context.Context, id string) error {
 	return d.WithTx(ctx, func(tx *sql.Tx) error {
 		var references int

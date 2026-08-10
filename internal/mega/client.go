@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	goMega "github.com/t3rm1n4l/go-mega"
 )
 
 const (
@@ -76,21 +74,6 @@ func (c *Client) WithHTTPClient(client *http.Client) *Client {
 		return nil
 	}
 	return &Client{httpClient: client, apiURL: c.apiURL, session: c.session}
-}
-
-// LoginAccount uses the maintained go-mega authentication primitive and
-// returns only its opaque session identifier. MFA-required errors are passed
-// through so callers can present the explicit unsupported-account message.
-func (c *Client) LoginAccount(email, password string) (string, error) {
-	if c == nil || c.httpClient == nil {
-		return "", fmt.Errorf("MEGA HTTP client is unavailable")
-	}
-	account := goMega.New().SetClient(c.httpClient).SetLogger(nil).SetDebugger(nil)
-	account.SetAPIUrl(strings.TrimSuffix(c.apiURL, "/cs"))
-	if err := account.Login(email, password); err != nil {
-		return "", err
-	}
-	return account.GetSessionID(), nil
 }
 
 // NewClient constructs a public-link client. apiBaseURL may be either the
@@ -173,8 +156,8 @@ func (c *Client) payloadFromCommand(ctx context.Context, command map[string]any,
 }
 
 // ResolveLink resolves a public file or folder link. accountID is accepted for
-// the stable future-facing contract but is intentionally unused in this
-// anonymous protocol spike; authenticated account plumbing belongs to Phase F.
+// the stable job contract; account authentication is established by the
+// caller's session-bound client, while this method remains public-link-only.
 func (c *Client) ResolveLink(ctx context.Context, rawURL, accountID string) (ResolvedJob, error) {
 	link, err := ParseLink(rawURL)
 	if err != nil {
@@ -470,6 +453,13 @@ func (c *Client) payloadURL(ctx context.Context, nodeHandle, folderHandle string
 }
 
 func (c *Client) command(ctx context.Context, payload []map[string]any, folderHandle string) ([]any, error) {
+	return c.doCommand(ctx, payload, folderHandle, true)
+}
+
+func (c *Client) doCommand(ctx context.Context, payload []map[string]any, folderHandle string, allowHashcash bool) ([]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal MEGA command: %w", err)
@@ -487,42 +477,82 @@ func (c *Client) command(ctx context.Context, payload []map[string]any, folderHa
 		query.Set("sid", c.session)
 	}
 	endpoint.RawQuery = query.Encode()
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create MEGA API request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	challenged := false
+	var challenge hashcashChallenge
+	var solution string
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create MEGA API request: %w", err)
 		}
-		// net/http transport errors can include the complete request URL. An
-		// authenticated command URL carries the account session in its query,
-		// so never propagate the raw transport error into logs or persisted job
-		// diagnostics.
-		return nil, fmt.Errorf("MEGA API request failed")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Accept", "application/json")
+		if challenged {
+			request.Header.Set("X-Hashcash", hashcashHeader(challenge, solution))
+		}
+		response, requestErr := c.httpClient.Do(request)
+		if requestErr != nil {
+			if response != nil && response.Body != nil {
+				_ = response.Body.Close()
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// net/http transport errors can include the complete request URL. An
+			// authenticated command URL carries the account session in its query,
+			// so never propagate the raw transport error into logs or persisted job
+			// diagnostics.
+			return nil, fmt.Errorf("MEGA API request failed")
+		}
+		if response.StatusCode == http.StatusPaymentRequired && allowHashcash && !challenged {
+			header := response.Header.Get("X-Hashcash")
+			_ = response.Body.Close()
+			parsed, ok := parseHashcashChallenge(header)
+			if !ok {
+				return nil, fmt.Errorf("MEGA hashcash challenge is invalid")
+			}
+			cash, solveErr := solveHashcash(ctx, parsed, hashcashTimeout)
+			if solveErr != nil {
+				return nil, solveErr
+			}
+			challenge = parsed
+			solution = cash
+			challenged = true
+			continue
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			status := response.StatusCode
+			_ = response.Body.Close()
+			if c.session != "" && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+				return nil, ErrSessionRejected
+			}
+			return nil, &APIHTTPError{StatusCode: status}
+		}
+		limited := io.LimitReader(response.Body, maxAPIResponse)
+		decoder := json.NewDecoder(limited)
+		decoder.UseNumber()
+		var result []any
+		decodeErr := decoder.Decode(&result)
+		closeErr := response.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode MEGA API response: %w", decodeErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close MEGA API response: %w", closeErr)
+		}
+		if len(result) == 0 {
+			return nil, fmt.Errorf("%w: empty MEGA API response", ErrInvalidLink)
+		}
+		if code, ok := numberValue(result[0]); ok && code < 0 {
+			apiError := &APIError{Code: int(code)}
+			if code == -26 {
+				return nil, ErrMFAUnsupported
+			}
+			return nil, apiError
+		}
+		return result, nil
 	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("MEGA API HTTP status %s", response.Status)
-	}
-	limited := io.LimitReader(response.Body, maxAPIResponse)
-	decoder := json.NewDecoder(limited)
-	decoder.UseNumber()
-	var result []any
-	if err := decoder.Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode MEGA API response: %w", err)
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("%w: empty MEGA API response", ErrInvalidLink)
-	}
-	if code, ok := numberValue(result[0]); ok && code < 0 {
-		return nil, &APIError{Code: int(code)}
-	}
-	return result, nil
+	return nil, fmt.Errorf("MEGA API request failed")
 }
 
 type folderNode struct {

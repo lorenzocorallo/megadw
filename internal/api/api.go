@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -59,6 +60,7 @@ type Server struct {
 	transports   *network.TransportPool
 	events       *events.Bus
 	allowedHosts map[string]struct{}
+	accountMu    sync.Mutex
 }
 
 func New(config Config) http.Handler {
@@ -363,6 +365,7 @@ func (s *Server) handlePutSettings(writer http.ResponseWriter, request *http.Req
 type resolveRequest struct {
 	URL       string `json:"url"`
 	AccountID string `json:"accountId"`
+	ProxyID   string `json:"proxyId"`
 }
 
 type resolvedFileResponse struct {
@@ -390,7 +393,7 @@ func (s *Server) resolve(ctx context.Context, input resolveRequest) (mega.Public
 	if s.mega == nil {
 		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, fmt.Errorf("MEGA resolver is unavailable")
 	}
-	client, err := s.clientForAccount(ctx, input.AccountID)
+	client, err := s.clientForAccountWithProxy(ctx, input.AccountID, input.ProxyID)
 	if err != nil {
 		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, err
 	}
@@ -423,45 +426,68 @@ func (s *Server) handleResolve(writer http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) clientForAccount(ctx context.Context, accountID string) (*mega.Client, error) {
+	return s.clientForAccountWithProxy(ctx, accountID, "")
+}
+
+func (s *Server) clientForAccountWithProxy(ctx context.Context, accountID, proxyID string) (*mega.Client, error) {
 	if accountID == "" {
-		return s.mega, nil
+		return s.clientForProxy(ctx, proxyID)
 	}
 	if s.config.DB == nil || s.config.Secrets == nil {
 		return nil, fmt.Errorf("account storage is unavailable")
 	}
-	account, err := s.config.DB.GetMegaAccount(ctx, accountID)
+	client, err := s.clientForProxy(ctx, proxyID)
 	if err != nil {
 		return nil, err
 	}
-	credentialCipher, sessionCipher, err := s.config.DB.MegaAccountSecrets(ctx, accountID)
+	// Account authentication is intentionally serialized per server. This
+	// prevents concurrent download/API requests from racing a session
+	// replacement while keeping the protocol itself goroutine-free.
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
+	lifecycle := mega.NewAccountLifecycle(client, s.config.DB, s.config.Secrets)
+	authenticated, err := lifecycle.ClientFor(ctx, accountID)
+	if err == nil && s.downloads != nil {
+		// A resolve may have replaced a revoked session. Do not let a download
+		// worker retain a prior session-bound client across that boundary.
+		s.downloads.InvalidateAccountSession(accountID)
+	}
+	return authenticated, err
+}
+
+func (s *Server) clientForProxy(ctx context.Context, proxyID string) (*mega.Client, error) {
+	if proxyID == "" {
+		return s.mega, nil
+	}
+	if s.config.DB == nil || s.config.Secrets == nil || s.transports == nil || s.mega == nil {
+		return nil, fmt.Errorf("proxy transport is unavailable")
+	}
+	profile, err := s.config.DB.GetProxyProfile(ctx, proxyID)
 	if err != nil {
 		return nil, err
 	}
-	if len(sessionCipher) > 0 {
-		session, err := s.config.Secrets.Decrypt(sessionCipher)
-		if err == nil && len(session) > 0 {
-			return s.mega.WithSession(string(session)), nil
+	if !profile.Enabled {
+		return nil, fmt.Errorf("proxy profile is disabled")
+	}
+	passwordCiphertext, err := s.config.DB.ProxySecret(ctx, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	password := ""
+	if len(passwordCiphertext) > 0 {
+		plain, decryptErr := s.config.Secrets.Decrypt(passwordCiphertext)
+		if decryptErr != nil {
+			return nil, fmt.Errorf("proxy credentials are unavailable")
 		}
+		password = string(plain)
+		clear(plain)
 	}
-	credential, err := s.config.Secrets.Decrypt(credentialCipher)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt account credential: %w", err)
-	}
-	session, err := s.mega.LoginAccount(account.Email, string(credential))
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "multi-factor") {
-			return nil, fmt.Errorf("MFA-enabled accounts are not supported in this version")
-		}
-		return nil, fmt.Errorf("MEGA account login failed")
-	}
-	sessionCipher, err = s.config.Secrets.Encrypt([]byte(session))
+	httpClient, err := s.transports.Client(network.ProxyProfile{ID: profile.ID, Name: profile.Name, Type: network.ProxyType(profile.Type), Host: profile.Host, Port: profile.Port, Username: profile.Username, Password: password, Timeout: time.Duration(profile.TimeoutSeconds) * time.Second, Enabled: profile.Enabled})
+	password = ""
 	if err != nil {
 		return nil, err
 	}
-	if err := s.config.DB.UpdateMegaAccount(ctx, accountID, account.Label, account.Email, nil, sessionCipher, "active", account.DefaultForDownloads, time.Now()); err != nil {
-		return nil, err
-	}
-	return s.mega.WithSession(session), nil
+	return s.mega.WithHTTPClient(httpClient), nil
 }
 
 type accountRequest struct {
@@ -469,6 +495,7 @@ type accountRequest struct {
 	Email               string `json:"email"`
 	Password            string `json:"password"`
 	DefaultForDownloads *bool  `json:"defaultForDownloads"`
+	ProxyID             string `json:"proxyId"`
 }
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
@@ -488,10 +515,19 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request, _ a
 		writeError(w, 400, "account_invalid", "label, email, and password are required", nil)
 		return
 	}
-	session, err := s.mega.LoginAccount(in.Email, in.Password)
+	client, err := s.clientForProxy(r.Context(), in.ProxyID)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "multi-factor") {
+		writeError(w, 400, "proxy_invalid", "selected proxy profile is unavailable", nil)
+		return
+	}
+	s.accountMu.Lock()
+	session, err := client.LoginAndValidate(r.Context(), in.Email, in.Password)
+	s.accountMu.Unlock()
+	if err != nil {
+		if errors.Is(err, mega.ErrMFAUnsupported) {
 			writeError(w, 400, "account_mfa_unsupported", "MFA-enabled accounts are not supported in this version", nil)
+		} else if errors.Is(err, mega.ErrReauthRequired) {
+			writeError(w, 409, "account_reauth_required", "MEGA account requires authentication", nil)
 		} else {
 			writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
 		}
@@ -502,7 +538,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request, _ a
 		writeError(w, 500, "encryption_error", "could not protect account credential", nil)
 		return
 	}
-	sessionCipher, err := s.config.Secrets.Encrypt([]byte(session))
+	sessionCipher, err := s.config.Secrets.Encrypt([]byte(session.SessionID))
 	if err != nil {
 		writeError(w, 500, "encryption_error", "could not protect account session", nil)
 		return
@@ -518,28 +554,33 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request, _ a
 }
 func (s *Server) handleTestAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
 	id := r.PathValue("id")
-	account, err := s.config.DB.GetMegaAccount(r.Context(), id)
-	if err != nil {
+	if _, err := s.config.DB.GetMegaAccount(r.Context(), id); err != nil {
 		writeError(w, 404, "account_not_found", "account was not found", nil)
 		return
 	}
-	credential, _, err := s.config.DB.MegaAccountSecrets(r.Context(), id)
+	proxyID := r.URL.Query().Get("proxyId")
+	client, err := s.clientForProxy(r.Context(), proxyID)
 	if err != nil {
-		writeError(w, 500, "database_error", "could not read account", nil)
+		writeError(w, 400, "proxy_invalid", "selected proxy profile is unavailable", nil)
 		return
 	}
-	password, err := s.config.Secrets.Decrypt(credential)
+	s.accountMu.Lock()
+	health, err := mega.NewAccountLifecycle(client, s.config.DB, s.config.Secrets).Test(r.Context(), id)
+	s.accountMu.Unlock()
 	if err != nil {
-		writeError(w, 500, "encryption_error", "could not decrypt account credential", nil)
+		if errors.Is(err, mega.ErrMFAUnsupported) {
+			writeError(w, 400, "account_mfa_unsupported", "MFA-enabled accounts are not supported in this version", nil)
+		} else if errors.Is(err, mega.ErrReauthRequired) {
+			writeError(w, 409, "account_reauth_required", "MEGA account requires authentication", nil)
+		} else {
+			writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+		}
 		return
 	}
-	if _, err = s.mega.LoginAccount(account.Email, string(password)); err != nil {
-		_ = s.config.DB.MarkMegaAccountChecked(r.Context(), id, "error", time.Now())
-		writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
-		return
+	if s.downloads != nil {
+		s.downloads.InvalidateAccountSession(id)
 	}
-	_ = s.config.DB.MarkMegaAccountChecked(r.Context(), id, "active", time.Now())
-	writeJSON(w, 200, map[string]string{"status": "active"})
+	writeJSON(w, 200, map[string]any{"status": "active", "storageBytes": health.StorageBytes, "usedBytes": health.UsedBytes})
 }
 func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
 	id := r.PathValue("id")
@@ -564,9 +605,20 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ a
 	}
 	var credential, session []byte
 	if in.Password != "" {
-		sessionID, loginErr := s.mega.LoginAccount(in.Email, in.Password)
+		client, proxyErr := s.clientForProxy(r.Context(), in.ProxyID)
+		if proxyErr != nil {
+			writeError(w, 400, "proxy_invalid", "selected proxy profile is unavailable", nil)
+			return
+		}
+		s.accountMu.Lock()
+		loginResult, loginErr := client.LoginAndValidate(r.Context(), in.Email, in.Password)
+		s.accountMu.Unlock()
 		if loginErr != nil {
-			writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+			if errors.Is(loginErr, mega.ErrMFAUnsupported) {
+				writeError(w, 400, "account_mfa_unsupported", "MFA-enabled accounts are not supported in this version", nil)
+			} else {
+				writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+			}
 			return
 		}
 		credential, err = s.config.Secrets.Encrypt([]byte(in.Password))
@@ -574,7 +626,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ a
 			writeError(w, 500, "encryption_error", "could not protect account credential", nil)
 			return
 		}
-		session, err = s.config.Secrets.Encrypt([]byte(sessionID))
+		session, err = s.config.Secrets.Encrypt([]byte(loginResult.SessionID))
 		if err != nil {
 			writeError(w, 500, "encryption_error", "could not protect account session", nil)
 			return
@@ -585,6 +637,9 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	record, _ := s.config.DB.GetMegaAccount(r.Context(), id)
+	if s.downloads != nil {
+		s.downloads.InvalidateAccountSession(id)
+	}
 	s.events.Publish(events.Event{Name: events.AccountUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"id": id}})
 	writeJSON(w, 200, record)
 }
@@ -595,6 +650,9 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, _ a
 	} else if err != nil {
 		writeError(w, 404, "account_not_found", "account was not found", nil)
 		return
+	}
+	if s.downloads != nil {
+		s.downloads.InvalidateAccountSession(r.PathValue("id"))
 	}
 	s.events.Publish(events.Event{Name: events.AccountUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"id": r.PathValue("id"), "deleted": true}})
 	writeJSON(w, 200, map[string]bool{"deleted": true})
@@ -735,6 +793,9 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, _ aut
 	if s.transports != nil {
 		s.transports.Remove(id)
 	}
+	if s.downloads != nil {
+		s.downloads.InvalidateProxySessions(id)
+	}
 	record, _ := s.config.DB.GetProxyProfile(r.Context(), id)
 	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"proxyId": id}})
 	writeJSON(w, 200, record)
@@ -750,6 +811,9 @@ func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, _ aut
 	}
 	if s.transports != nil {
 		s.transports.Remove(id)
+	}
+	if s.downloads != nil {
+		s.downloads.InvalidateProxySessions(id)
 	}
 	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"proxyId": id, "deleted": true}})
 	writeJSON(w, 200, map[string]bool{"deleted": true})
@@ -795,7 +859,7 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusBadRequest, "destination_invalid", err.Error(), nil)
 		return
 	}
-	link, job, _, err := s.resolve(request.Context(), resolveRequest{URL: input.URL, AccountID: input.AccountID})
+	link, job, _, err := s.resolve(request.Context(), resolveRequest{URL: input.URL, AccountID: input.AccountID, ProxyID: input.ProxyID})
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, errorCode(err), err.Error(), nil)
 		return
@@ -1220,6 +1284,12 @@ func uniqueRelativePath(value string, seen map[string]struct{}) string {
 func errorCode(err error) string {
 	if errors.Is(err, mega.ErrInvalidLink) || errors.Is(err, mega.ErrInvalidKey) {
 		return "link_invalid"
+	}
+	if errors.Is(err, mega.ErrReauthRequired) {
+		return "account_reauth_required"
+	}
+	if errors.Is(err, mega.ErrMFAUnsupported) {
+		return "account_mfa_unsupported"
 	}
 	return "resolve_failed"
 }

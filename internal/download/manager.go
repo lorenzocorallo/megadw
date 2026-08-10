@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -29,6 +30,7 @@ const (
 	defaultReadIdleTimeout    = 90 * time.Second
 	maxQueuedJobs             = 128
 	maxSpeedMeters            = 512
+	maxCachedAccountClients   = 64
 )
 
 // Config wires the transfer engine to persistence and the validated MEGA
@@ -168,7 +170,12 @@ type Manager struct {
 	done           chan struct{}
 	jobsWG         sync.WaitGroup
 
-	finalMu sync.Mutex
+	finalMu   sync.Mutex
+	accountMu sync.Mutex
+	// accountClients contains at most maxCachedAccountClients session-bound,
+	// authentication-only clients; it owns no goroutine or transport and is
+	// cleared on shutdown or account mutation.
+	accountClients map[string]*mega.Client
 
 	speedMu    sync.Mutex
 	speeds     map[string]*SpeedMeter
@@ -308,6 +315,7 @@ func NewManager(config Config) (*Manager, error) {
 		speeds:             make(map[string]*SpeedMeter),
 		quotaTimers:        make(map[string]*quotaTimer),
 		quotaAll:           make(map[*quotaTimer]struct{}),
+		accountClients:     make(map[string]*mega.Client),
 	}
 	heap.Init(&manager.queue)
 	return manager, nil
@@ -641,6 +649,7 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 	done := m.done
 	m.mu.Unlock()
 	if !started {
+		m.clearAccountClients()
 		return nil
 	}
 	if cancel != nil {
@@ -658,6 +667,7 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 	m.quotaAll = make(map[*quotaTimer]struct{})
 	m.mu.Unlock()
 	if done == nil {
+		m.clearAccountClients()
 		return nil
 	}
 	select {
@@ -672,7 +682,51 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	m.clearAccountClients()
 	return nil
+}
+
+// InvalidateAccountSession drops cached session-bound clients after an
+// account edit/test/re-authentication. It never closes the shared proxy
+// transport; the transport pool owns that resource.
+func (m *Manager) InvalidateAccountSession(accountID string) {
+	if m == nil || accountID == "" {
+		return
+	}
+	m.accountMu.Lock()
+	defer m.accountMu.Unlock()
+	prefix := accountID + "\x00"
+	for key := range m.accountClients {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.accountClients, key)
+		}
+	}
+}
+
+// InvalidateProxySessions drops cached account clients that route through a
+// changed or deleted proxy profile. The shared transport pool remains the
+// owner of the underlying HTTP clients.
+func (m *Manager) InvalidateProxySessions(proxyID string) {
+	if m == nil || proxyID == "" {
+		return
+	}
+	m.accountMu.Lock()
+	defer m.accountMu.Unlock()
+	suffix := "\x00" + proxyID
+	for key := range m.accountClients {
+		if strings.HasSuffix(key, suffix) {
+			delete(m.accountClients, key)
+		}
+	}
+}
+
+func (m *Manager) clearAccountClients() {
+	if m == nil {
+		return
+	}
+	m.accountMu.Lock()
+	m.accountClients = make(map[string]*mega.Client)
+	m.accountMu.Unlock()
 }
 
 // PauseJob requests a durable pause and waits for active range workers to
@@ -1607,7 +1661,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.DownloadJobRecord, file store.DownloadFileRecord, writer interface {
 	WriteAt([]byte, int64) (int, error)
 }, key mega.FileKey, payloadURL string, segment Segment, limiter *BandwidthLimiter, meter *SpeedMeter) (int64, error) {
-	worker, client, err := m.workerForJob(job)
+	worker, client, err := m.workerForJob(ctx, job)
 	if err != nil {
 		return 0, err
 	}
@@ -1629,6 +1683,19 @@ func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.Downl
 		if class == RetryRefreshURL && refreshes < 1 {
 			refreshes++
 			newURL, refreshErr := m.refreshPayloadURL(ctx, job, &file, client)
+			if refreshErr != nil && errors.Is(refreshErr, mega.ErrSessionRejected) && job.AccountID != "" {
+				// A payload URL can expire at the same time as the account
+				// session. Rebuild the bounded account client once; the lifecycle
+				// performs at most one stored-session validation/password fallback.
+				m.InvalidateAccountSession(job.AccountID)
+				var authErr error
+				worker, client, authErr = m.workerForJob(ctx, job)
+				if authErr == nil {
+					newURL, refreshErr = m.refreshPayloadURL(ctx, job, &file, client)
+				} else {
+					refreshErr = authErr
+				}
+			}
 			if refreshErr == nil {
 				payloadURL = newURL
 				continue
@@ -1657,70 +1724,84 @@ func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.Downl
 	}
 }
 
-func (m *Manager) workerForJob(job *store.DownloadJobRecord) (*RangeWorker, *mega.Client, error) {
-	client := m.mega
+func (m *Manager) workerForJob(ctx context.Context, job *store.DownloadJobRecord) (*RangeWorker, *mega.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	accountKey := ""
 	if job.AccountID != "" {
-		credentialCipher, sessionCipher, err := m.db.MegaAccountSecrets(context.Background(), job.AccountID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load account: %w", err)
-		}
-		if len(sessionCipher) > 0 {
-			session, err := m.secrets.Decrypt(sessionCipher)
-			if err != nil {
-				return nil, nil, fmt.Errorf("decrypt account session: %w", err)
-			}
-			client = client.WithSession(string(session))
-		} else if len(credentialCipher) > 0 {
-			account, accountErr := m.db.GetMegaAccount(context.Background(), job.AccountID)
-			if accountErr != nil {
-				return nil, nil, accountErr
-			}
-			password, decryptErr := m.secrets.Decrypt(credentialCipher)
-			if decryptErr != nil {
-				return nil, nil, fmt.Errorf("decrypt account credential: %w", decryptErr)
-			}
-			session, loginErr := client.LoginAccount(account.Email, string(password))
-			if loginErr != nil {
-				return nil, nil, fmt.Errorf("MEGA account login failed")
-			}
-			sessionCipher, encryptErr := m.secrets.Encrypt([]byte(session))
-			if encryptErr != nil {
-				return nil, nil, encryptErr
-			}
-			_ = m.db.UpdateMegaAccount(context.Background(), account.ID, account.Label, account.Email, nil, sessionCipher, "active", account.DefaultForDownloads, m.now())
-			client = client.WithSession(session)
+		accountKey = job.AccountID + "\x00" + job.ProxyID
+		m.accountMu.Lock()
+		cached := m.accountClients[accountKey]
+		m.accountMu.Unlock()
+		if cached != nil {
+			return NewRangeWorker(cached), cached, nil
 		}
 	}
-	if job.ProxyID == "" || m.transportPool == nil {
-		if job.ProxyID != "" && m.transportPool == nil {
-			return nil, nil, fmt.Errorf("proxy transport pool is unavailable")
+	client := m.mega
+	// Select the immutable transport before account authentication so all
+	// prelogin, login, session validation, and payload commands use the same
+	// configured route.
+	if job.ProxyID != "" && m.transportPool == nil {
+		return nil, nil, fmt.Errorf("proxy transport pool is unavailable")
+	}
+	if job.ProxyID != "" {
+		profile, err := m.db.GetProxyProfile(ctx, job.ProxyID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load proxy profile: %w", err)
 		}
+		if !profile.Enabled {
+			return nil, nil, fmt.Errorf("proxy profile is disabled")
+		}
+		passwordCipher, err := m.db.ProxySecret(ctx, job.ProxyID)
+		if err != nil {
+			return nil, nil, err
+		}
+		password := ""
+		if len(passwordCipher) > 0 {
+			plain, decryptErr := m.secrets.Decrypt(passwordCipher)
+			if decryptErr != nil {
+				return nil, nil, fmt.Errorf("proxy credentials are unavailable")
+			}
+			password = string(plain)
+			clear(plain)
+		}
+		httpClient, err := m.transportPool.Client(network.ProxyProfile{ID: profile.ID, Name: profile.Name, Type: network.ProxyType(profile.Type), Host: profile.Host, Port: profile.Port, Username: profile.Username, Password: password, Timeout: time.Duration(profile.TimeoutSeconds) * time.Second, Enabled: profile.Enabled})
+		password = ""
+		if err != nil {
+			return nil, nil, err
+		}
+		client = client.WithHTTPClient(httpClient)
+	}
+	if job.AccountID != "" {
+		m.accountMu.Lock()
+		if cached := m.accountClients[accountKey]; cached != nil {
+			client = cached
+			m.accountMu.Unlock()
+		} else {
+			var err error
+			client, err = mega.NewAccountLifecycle(client, m.db, m.secrets).ClientFor(ctx, job.AccountID)
+			if err == nil {
+				if m.accountClients == nil {
+					m.accountClients = make(map[string]*mega.Client)
+				}
+				if len(m.accountClients) >= maxCachedAccountClients {
+					for cachedKey := range m.accountClients {
+						delete(m.accountClients, cachedKey)
+						break
+					}
+				}
+				m.accountClients[accountKey] = client
+			}
+			m.accountMu.Unlock()
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	if job.ProxyID == "" && job.AccountID == "" {
 		return m.worker, client, nil
 	}
-	profile, err := m.db.GetProxyProfile(context.Background(), job.ProxyID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load proxy profile: %w", err)
-	}
-	if !profile.Enabled {
-		return nil, nil, fmt.Errorf("proxy profile is disabled")
-	}
-	passwordCipher, err := m.db.ProxySecret(context.Background(), job.ProxyID)
-	if err != nil {
-		return nil, nil, err
-	}
-	password := ""
-	if len(passwordCipher) > 0 {
-		plain, err := m.secrets.Decrypt(passwordCipher)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decrypt proxy password: %w", err)
-		}
-		password = string(plain)
-	}
-	httpClient, err := m.transportPool.Client(network.ProxyProfile{ID: profile.ID, Name: profile.Name, Type: network.ProxyType(profile.Type), Host: profile.Host, Port: profile.Port, Username: profile.Username, Password: password, Timeout: time.Duration(profile.TimeoutSeconds) * time.Second, Enabled: profile.Enabled})
-	if err != nil {
-		return nil, nil, err
-	}
-	client = client.WithHTTPClient(httpClient)
 	return NewRangeWorker(client), client, nil
 }
 

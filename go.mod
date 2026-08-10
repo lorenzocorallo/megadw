@@ -6,7 +6,7 @@ toolchain go1.26.5
 
 require (
 	github.com/t3rm1n4l/go-mega v0.0.0-20251120131202-6845944c051c
-	golang.org/x/crypto v0.45.0
+	golang.org/x/crypto v0.52.0
 	modernc.org/sqlite v1.56.0
 )
 

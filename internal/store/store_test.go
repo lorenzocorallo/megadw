@@ -97,6 +97,20 @@ func TestSecretStoreEncryptsAndRejectsCorruption(t *testing.T) {
 	}
 }
 
+func TestSecretStoreRejectsSymlinkPath(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "real-secret.key")
+	if err := os.WriteFile(target, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "secret.key")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenSecretStore(link); err == nil {
+		t.Fatal("secret store accepted a symlink path")
+	}
+}
+
 func TestSettingsRestartAndAtomicValidation(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "megad.sqlite3")
 	open := func() (*store.DB, *settings.Service) {

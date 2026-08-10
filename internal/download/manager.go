@@ -601,7 +601,21 @@ func (m *Manager) RunJob(ctx context.Context, jobID string) error {
 
 // Close cancels active queue jobs and waits until their checkpoint/pause paths
 // have completed. No goroutine owned by the manager remains afterwards.
+//
+// Callers that own a process shutdown deadline should use CloseContext. The
+// context is only a bound for waiting; cancellation is always sent to every
+// active network request before the wait begins.
 func (m *Manager) Close() error {
+	return m.CloseContext(context.Background())
+}
+
+// CloseContext performs an orderly bounded shutdown of the transfer engine.
+// Active jobs observe cancellation, checkpoint already-written ranges, and
+// persist a resumable paused state before the manager signals completion.
+func (m *Manager) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -615,15 +629,24 @@ func (m *Manager) Close() error {
 	if !started {
 		return nil
 	}
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	m.mu.Lock()
 	for id, timer := range m.quotaTimers {
 		timer.Stop()
 		delete(m.quotaTimers, id)
 	}
 	m.mu.Unlock()
-	<-done
-	return nil
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // PauseJob requests a durable pause and waits for active range workers to

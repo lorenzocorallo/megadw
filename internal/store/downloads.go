@@ -380,7 +380,7 @@ func (d *DB) CheckpointDownloadFiles(ctx context.Context, updates []DownloadFile
 	if len(updates) == 0 {
 		return nil
 	}
-	return d.WithTx(ctx, func(tx *sql.Tx) error {
+	err := d.WithTx(ctx, func(tx *sql.Tx) error {
 		for _, update := range updates {
 			if update.FileID == "" {
 				return fmt.Errorf("checkpoint file id is required")
@@ -415,6 +415,10 @@ func (d *DB) CheckpointDownloadFiles(ctx context.Context, updates []DownloadFile
 		}
 		return nil
 	})
+	if err == nil {
+		d.checkpointTransactions.Add(1)
+	}
+	return err
 }
 
 // UpdateDownloadFileState updates a lifecycle state and optional diagnostic.

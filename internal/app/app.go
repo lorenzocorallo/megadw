@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/auth"
@@ -40,6 +42,8 @@ type App struct {
 	Downloads  *download.Manager
 	Transports *network.TransportPool
 	Events     *events.Bus
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func Open(ctx context.Context, config Config) (*App, error) {
@@ -98,20 +102,51 @@ func Open(ctx context.Context, config Config) (*App, error) {
 }
 
 func (a *App) Close() error {
+	return a.CloseContext(context.Background())
+}
+
+// CloseContext shuts down owned goroutines and resources in dependency order.
+// The transfer manager is stopped before SQLite is closed so its final
+// checkpoint transaction cannot race a closing database. A release shutdown
+// passes the process-wide 20-second deadline here; if that deadline expires,
+// SQLite is deliberately left open until the process supervisor reclaims it.
+func (a *App) CloseContext(ctx context.Context) error {
 	if a == nil || a.DB == nil {
 		return nil
 	}
-	if a.Downloads != nil {
-		_ = a.Downloads.Close()
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if a.Events != nil {
-		a.Events.Close()
-	}
-	if a.Mega != nil {
-		a.Mega.CloseIdleConnections()
-	}
-	if a.Transports != nil {
-		a.Transports.Close()
-	}
-	return a.DB.Close()
+	a.closeOnce.Do(func() {
+		var errs []error
+		managerClosed := true
+		if a.Downloads != nil {
+			if err := a.Downloads.CloseContext(ctx); err != nil {
+				managerClosed = false
+				errs = append(errs, fmt.Errorf("close download manager: %w", err))
+			}
+		}
+		if a.Events != nil {
+			a.Events.Close()
+		}
+		if a.Mega != nil {
+			a.Mega.CloseIdleConnections()
+		}
+		if a.Transports != nil {
+			a.Transports.Close()
+		}
+		if managerClosed {
+			if err := a.DB.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close database: %w", err))
+			}
+		} else {
+			// A timed-out manager may still be finishing its final checkpoint.
+			// Leave SQLite open rather than trading a bounded process exit for a
+			// concurrent close/write race. The process supervisor will reclaim it
+			// after the shutdown deadline.
+			errs = append(errs, errors.New("database left open because download manager did not finish"))
+		}
+		a.closeErr = errors.Join(errs...)
+	})
+	return a.closeErr
 }

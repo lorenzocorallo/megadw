@@ -141,6 +141,19 @@ func TestSettingsPutIsAtomicAndOriginChecked(t *testing.T) {
 	}
 }
 
+func TestVersionExposesReleaseBuildMetadata(t *testing.T) {
+	handler := api.New(api.Config{Version: "1.2.3", Commit: "abc123", BuildTime: "2026-08-10T12:00:00Z"})
+	response := doJSON(t, handler, http.MethodGet, "/api/v1/version", "", nil)
+	if response.status != http.StatusOK {
+		t.Fatalf("version status = %d, body = %s", response.status, response.body)
+	}
+	for _, value := range []string{"\"version\":\"1.2.3\"", "\"commit\":\"abc123\"", "\"buildTime\":\"2026-08-10T12:00:00Z\""} {
+		if !strings.Contains(response.body, value) {
+			t.Fatalf("version response missing %s: %s", value, response.body)
+		}
+	}
+}
+
 type testResponse struct {
 	status  int
 	body    string

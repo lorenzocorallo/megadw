@@ -39,6 +39,35 @@ func TestRootRejectsSymlinkComponents(t *testing.T) {
 	}
 }
 
+func TestRootRejectsSymlinkAtRootAndFinalTarget(t *testing.T) {
+	outside := t.TempDir()
+	rootPath := filepath.Join(t.TempDir(), "root")
+	if err := os.Symlink(outside, rootPath); err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsroot.New(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Prepare("file.bin"); !errors.Is(err, fsroot.ErrSymlink) {
+		t.Fatalf("symlinked root error = %v, want ErrSymlink", err)
+	}
+
+	cleanRoot, err := fsroot.New(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanRoot.Prepare("file.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside.bin"), filepath.Join(cleanRoot.Path(), "file.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanRoot.Prepare("file.bin"); !errors.Is(err, fsroot.ErrSymlink) {
+		t.Fatalf("symlinked final target error = %v, want ErrSymlink", err)
+	}
+}
+
 func TestConflictRenamePreservesExtension(t *testing.T) {
 	root, err := fsroot.New(filepath.Join(t.TempDir(), "root"))
 	if err != nil {

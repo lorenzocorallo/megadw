@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,7 +17,18 @@ import (
 // wrapper so repositories share one migration and transaction boundary.
 type DB struct {
 	*sql.DB
-	path string
+	path                   string
+	writeTransactions      atomic.Uint64
+	checkpointTransactions atomic.Uint64
+}
+
+// Stats is a low-cardinality release diagnostic snapshot. It is intentionally
+// process-local and is not exposed as a metrics endpoint; the resource
+// benchmark uses it to verify that progress is checkpointed in bounded
+// transactions.
+type Stats struct {
+	WriteTransactions      uint64
+	CheckpointTransactions uint64
 }
 
 // Open opens or creates a SQLite database, applies the required durability
@@ -76,6 +88,19 @@ func (d *DB) Path() string {
 	return d.path
 }
 
+// Stats returns successful write-transaction counters since the database was
+// opened. Read queries and per-progress writes outside WithTx are not counted
+// as transactions; checkpoint transactions are a subset of write transactions.
+func (d *DB) Stats() Stats {
+	if d == nil {
+		return Stats{}
+	}
+	return Stats{
+		WriteTransactions:      d.writeTransactions.Load(),
+		CheckpointTransactions: d.checkpointTransactions.Load(),
+	}
+}
+
 // WithTx executes fn in a transaction and rolls back when fn returns an
 // error. It is used for multi-row state changes that must be atomic.
 func (d *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -93,5 +118,6 @@ func (d *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
+	d.writeTransactions.Add(1)
 	return nil
 }

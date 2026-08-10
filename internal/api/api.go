@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/auth"
+	"github.com/lorenzocorallo/megadw/internal/buildinfo"
 	"github.com/lorenzocorallo/megadw/internal/download"
 	"github.com/lorenzocorallo/megadw/internal/events"
 	"github.com/lorenzocorallo/megadw/internal/fsroot"
@@ -26,11 +27,10 @@ import (
 )
 
 const (
-	maxJSONBody       = 256 << 10
-	maxResolveBody    = 256 << 10
-	maxSetupBody      = 256 << 10
-	maxSettingsBody   = 256 << 10
-	defaultAPIVersion = "dev"
+	maxJSONBody     = 256 << 10
+	maxResolveBody  = 256 << 10
+	maxSetupBody    = 256 << 10
+	maxSettingsBody = 256 << 10
 )
 
 type Config struct {
@@ -43,6 +43,8 @@ type Config struct {
 	Transports    *network.TransportPool
 	Events        *events.Bus
 	Version       string
+	Commit        string
+	BuildTime     string
 	SecureCookies bool
 	Now           func() time.Time
 }
@@ -72,7 +74,13 @@ func NewServer(config Config) *Server {
 		}
 	}
 	if config.Version == "" {
-		config.Version = defaultAPIVersion
+		config.Version = buildinfo.Current().Version
+	}
+	if config.Commit == "" {
+		config.Commit = buildinfo.Current().Commit
+	}
+	if config.BuildTime == "" {
+		config.BuildTime = buildinfo.Current().BuildTime
 	}
 	if config.Transports == nil {
 		config.Transports = network.NewTransportPool(network.TransportConfig{ConnectTimeout: 15 * time.Second, ResponseHeaderTimeout: 30 * time.Second, MaxConnectionsPerHost: 8})
@@ -155,7 +163,11 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 }
 
 func (s *Server) handleVersion(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"version": s.config.Version})
+	writeJSON(writer, http.StatusOK, map[string]string{
+		"version":   s.config.Version,
+		"commit":    s.config.Commit,
+		"buildTime": s.config.BuildTime,
+	})
 }
 
 func (s *Server) handleDashboard(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {

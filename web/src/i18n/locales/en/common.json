@@ -11,10 +11,11 @@
   },
   "shell": {
     "mainRegion": "Application content",
-    "version": "Phase C · secure local control plane"
+    "version": "Phase G · live download control plane"
   },
   "common": {
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "close": "Close"
   },
   "auth": {
     "username": "Username",
@@ -28,7 +29,8 @@
     "logout": "Sign out"
   },
   "errors": {
-    "requestFailed": "The request could not be completed."
+    "requestFailed": "The request could not be completed.",
+    "downloadNotFound": "This download could not be found."
   },
   "pages": {
     "dashboard": {
@@ -37,7 +39,7 @@
     },
     "downloads": {
       "title": "Downloads",
-      "description": "Download management will be connected in the transfer phase."
+      "description": "Monitor, control, and inspect every download from one queue."
     },
     "downloadDetail": {
       "title": "Download detail",
@@ -64,16 +66,30 @@
       "status": "Status",
       "actions": "Actions",
       "add": "Add account",
+      "save": "Save account",
+      "edit": "Edit",
+      "cancelEdit": "Cancel editing",
+      "confirmRemove": "Remove this account?",
       "test": "Test",
       "remove": "Remove",
       "saved": "Account saved.",
-      "default": "Default for downloads"
+      "default": "Default for downloads",
+      "statuses": {
+        "active": "Active",
+        "error": "Error",
+        "unknown": "Unknown"
+      }
     },
     "proxies": {
       "title": "Proxies",
       "description": "Route selected jobs through explicit HTTP, HTTPS CONNECT, or SOCKS5 profiles.",
       "name": "Name",
       "type": "Type",
+      "types": {
+        "http": "HTTP",
+        "https": "HTTPS CONNECT",
+        "socks5": "SOCKS5"
+      },
       "host": "Host",
       "port": "Port",
       "username": "Username",
@@ -81,6 +97,10 @@
       "endpoint": "Endpoint",
       "actions": "Actions",
       "add": "Add proxy",
+      "save": "Save proxy",
+      "edit": "Edit",
+      "cancelEdit": "Cancel editing",
+      "confirmRemove": "Remove this proxy profile?",
       "test": "Test",
       "remove": "Remove",
       "saved": "Proxy saved.",
@@ -96,16 +116,48 @@
     }
   },
   "dashboard": {
+    "currentSpeed": "Current speed",
     "activeJobs": "Active jobs",
     "queuedJobs": "Queued jobs",
     "waitingQuota": "Waiting for quota",
+    "sessionBytes": "Downloaded this session",
+    "diskFree": "Free space",
+    "live": "Live updates",
+    "reconnecting": "Reconnecting",
     "currentQueue": "Current queue",
-    "emptyQueue": "No downloads have been added yet."
+    "emptyQueue": "No downloads have been added yet.",
+    "viewAll": "View all downloads",
+    "progressFor": "Progress for {{name}}"
+  },
+  "queue": {
+    "pauseAll": "Pause queue",
+    "resumeAll": "Resume queue"
   },
   "downloads": {
     "name": "Name",
     "status": "Status",
-    "unknownStatus": "Unknown status"
+    "unknownStatus": "Unknown status",
+    "progress": "Progress",
+    "size": "Size",
+    "speed": "Speed",
+    "eta": "ETA",
+    "files": "Files",
+    "fileCount": "{{count}} files",
+    "account": "Account",
+    "proxy": "Proxy",
+    "added": "Added",
+    "actions": "Actions",
+    "search": "Search downloads",
+    "searchPlaceholder": "Search by name…",
+    "filterByState": "Filter downloads by status",
+    "allStatuses": "All statuses",
+    "tableLabel": "Downloads queue",
+    "sortBy": "Sort by {{column}}",
+    "idle": "Idle",
+    "etaUnknown": "—",
+    "etaHours": "{{value}}h",
+    "etaMinutes": "{{value}}m",
+    "etaSeconds": "{{value}}s"
   },
   "download": {
     "add": "Add download",
@@ -123,6 +175,31 @@
     "resolving": "Resolving…",
     "adding": "Adding…",
     "addDownload": "Add download",
+    "fileTree": "File tree",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "actionComplete": "Download action completed.",
+    "deleted": "Download removed.",
+    "confirmDelete": "Remove this download from the queue? Completed files will be kept.",
+    "confirmDeleteFiles": "Remove this download and its files? This cannot be undone.",
+    "backToDownloads": "Back to downloads",
+    "summary": "Summary",
+    "sourceType": "Source type",
+    "destination": "Destination",
+    "throughput": "Throughput",
+    "lastThirtyMinutes": "Last 30 minutes",
+    "throughputAria": "Download throughput for the last 30 minutes",
+    "chartUnavailable": "Throughput chart is unavailable. Download controls remain available.",
+    "chartWaiting": "Throughput telemetry will appear when the download starts.",
+    "filesTitle": "Files",
+    "filesTableLabel": "Files in this download",
+    "fileName": "File",
+    "eventsTitle": "Recent events",
+    "eventsLimit": "Last 200 state and diagnostic events",
+    "noEvents": "No events recorded yet.",
+    "quotaWaiting": "MEGA quota is exhausted. The next availability check is {{next}}.",
+    "nextRetryUnknown": "scheduled by the downloader",
     "resumeNow": "Resume now",
     "pause": "Pause",
     "added": "Download added to the queue.",
@@ -133,12 +210,19 @@
     },
     "status": {
       "ready": "Ready",
+      "pending": "Pending",
+      "resolving": "Resolving",
       "queued": "Queued",
       "downloading": "Downloading",
       "waiting_quota": "Waiting for quota",
       "paused": "Paused",
+      "paused_recovery": "Paused after restart",
+      "finalizing": "Finalizing",
+      "verifying": "Verifying",
+      "moving": "Moving",
       "completed": "Completed",
-      "failed": "Failed"
+      "failed": "Failed",
+      "cancelled": "Cancelled"
     }
   },
   "settings": {
@@ -173,6 +257,7 @@
     "kibibytes": "KiB",
     "mebibytes": "MiB",
     "gibibytes": "GiB",
-    "tebibytes": "TiB"
+    "tebibytes": "TiB",
+    "second": "s"
   }
 }

@@ -13,8 +13,12 @@ function LoginPage() {
   const [error, setError] = useState("");
   const mutation = useMutation({
     mutationFn: () => login(username, password),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+    onSuccess: (user) => {
+      queryClient.setQueryData(["auth-status"], {
+        setupRequired: false,
+        authenticated: true,
+        user,
+      });
       void navigate({ to: "/" });
     },
     onError: (value: Error) =>
@@ -35,6 +39,7 @@ function LoginPage() {
         <label className="block space-y-2">
           <span className="text-sm text-slate-300">{t("auth.username")}</span>
           <input
+            required
             className={inputClass}
             autoComplete="username"
             value={username}
@@ -44,6 +49,7 @@ function LoginPage() {
         <label className="block space-y-2">
           <span className="text-sm text-slate-300">{t("auth.password")}</span>
           <input
+            required
             className={inputClass}
             type="password"
             autoComplete="current-password"

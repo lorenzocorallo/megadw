@@ -14,6 +14,21 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
     if (settingsQuery.data) setValue(settingsQuery.data);
   }, [settingsQuery.data]);
 
+  useEffect(() => {
+    if (section !== "appearance" || !value) return;
+    const theme = value.ui.theme;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.dataset.theme = theme;
+    };
+    apply();
+    if (theme !== "system") return;
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [section, value]);
+
   const saveMutation = useMutation({
     mutationFn: (next: Settings) => putSettings(next),
     onSuccess: (next) => {
@@ -26,11 +41,15 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
     },
   });
 
+  if (settingsQuery.isError) {
+    return (
+      <p className="text-sm text-amber-300" role="alert">
+        {t("errors.requestFailed")}
+      </p>
+    );
+  }
   if (settingsQuery.isPending || value === null) {
     return <p className="text-sm text-slate-400">{t("common.loading")}</p>;
-  }
-  if (settingsQuery.isError) {
-    return <p className="text-sm text-amber-300">{t("errors.requestFailed")}</p>;
   }
 
   const update = (change: (current: Settings) => Settings) => {

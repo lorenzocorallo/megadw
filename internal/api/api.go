@@ -10,11 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/auth"
 	"github.com/lorenzocorallo/megadw/internal/download"
+	"github.com/lorenzocorallo/megadw/internal/events"
 	"github.com/lorenzocorallo/megadw/internal/fsroot"
 	"github.com/lorenzocorallo/megadw/internal/mega"
 	"github.com/lorenzocorallo/megadw/internal/network"
@@ -38,6 +41,7 @@ type Config struct {
 	Mega          *mega.Client
 	Downloads     *download.Manager
 	Transports    *network.TransportPool
+	Events        *events.Bus
 	Version       string
 	SecureCookies bool
 	Now           func() time.Time
@@ -50,6 +54,7 @@ type Server struct {
 	mega       *mega.Client
 	downloads  *download.Manager
 	transports *network.TransportPool
+	events     *events.Bus
 }
 
 func New(config Config) http.Handler {
@@ -72,13 +77,17 @@ func NewServer(config Config) *Server {
 	if config.Transports == nil {
 		config.Transports = network.NewTransportPool(network.TransportConfig{ConnectTimeout: 15 * time.Second, ResponseHeaderTimeout: 30 * time.Second, MaxConnectionsPerHost: 8})
 	}
-	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads, transports: config.Transports}
+	if config.Events == nil {
+		config.Events = events.NewBus()
+	}
+	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads, transports: config.Transports, events: config.Events}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
+	mux.HandleFunc("GET /api/v1/dashboard", s.withAuth(s.handleDashboard))
 	mux.HandleFunc("GET /api/v1/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/v1/auth/setup", s.handleSetup)
 	// Keep a short first-run alias for clients that discover setup before the
@@ -95,10 +104,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/downloads", s.withAuth(s.handleCreateDownload))
 	mux.HandleFunc("GET /api/v1/downloads", s.withAuth(s.handleListDownloads))
 	mux.HandleFunc("GET /api/v1/downloads/{id}", s.withAuth(s.handleGetDownload))
+	mux.HandleFunc("GET /api/v1/downloads/{id}/events", s.withAuth(s.handleDownloadEvents))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/pause", s.withAuth(s.handlePauseDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/resume", s.withAuth(s.handleResumeDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/retry", s.withAuth(s.handleRetryDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/cancel", s.withAuth(s.handleCancelDownload))
+	mux.HandleFunc("DELETE /api/v1/downloads/{id}", s.withAuth(s.handleDeleteDownload))
 	mux.HandleFunc("POST /api/v1/queue/pause", s.withAuth(s.handlePauseQueue))
 	mux.HandleFunc("POST /api/v1/queue/resume", s.withAuth(s.handleResumeQueue))
 	mux.HandleFunc("GET /api/v1/accounts", s.withAuth(s.handleListAccounts))
@@ -111,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/proxies/{id}/test", s.withAuth(s.handleTestProxy))
 	mux.HandleFunc("PUT /api/v1/proxies/{id}", s.withAuth(s.handleUpdateProxy))
 	mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.withAuth(s.handleDeleteProxy))
+	mux.HandleFunc("GET /api/v1/events", s.withAuth(s.handleEvents))
 
 	return sameOrigin(mux)
 }
@@ -144,6 +156,59 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 
 func (s *Server) handleVersion(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"version": s.config.Version})
+}
+
+func (s *Server) handleDashboard(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.config.DB == nil {
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
+		return
+	}
+	jobs, err := s.config.DB.ListDownloadJobs(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "database_error", "could not read dashboard state", nil)
+		return
+	}
+	var active, queued, waiting int
+	var speed float64
+	var sessionBytes int64
+	for index := range jobs {
+		job := &jobs[index]
+		s.decorateDownload(job)
+		switch download.JobState(job.State) {
+		case download.JobReady, download.JobQueued:
+			queued++
+		case download.JobResolving, download.JobDownloading, download.JobFinalizing:
+			active++
+		case download.JobWaitingQuota:
+			waiting++
+		}
+		speed += job.SpeedBytesPerSecond
+		if s.downloads != nil {
+			sessionBytes += s.downloads.Speed(job.ID).TotalBytes
+		}
+	}
+	freeBytes := int64(0)
+	if s.settings != nil {
+		if value, settingsErr := s.settings.Get(request.Context()); settingsErr == nil {
+			freeBytes = diskFreeBytes(value.Paths.CompleteRoot)
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"activeJobs":                 active,
+		"queuedJobs":                 queued,
+		"waitingQuotaJobs":           waiting,
+		"currentSpeedBytesPerSecond": speed,
+		"bytesDownloadedThisSession": sessionBytes,
+		"diskFreeBytes":              freeBytes,
+	})
+}
+
+func diskFreeBytes(path string) int64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize)
 }
 
 func (s *Server) handleAuthStatus(writer http.ResponseWriter, request *http.Request) {
@@ -271,6 +336,7 @@ func (s *Server) handlePutSettings(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "settings_invalid", err.Error(), nil)
 		return
 	}
+	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"settings": value}})
 	writeJSON(writer, http.StatusOK, value)
 }
 
@@ -427,6 +493,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request, _ a
 		writeError(w, 500, "database_error", "could not save account", nil)
 		return
 	}
+	s.events.Publish(events.Event{Name: events.AccountUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"id": record.ID}})
 	writeJSON(w, http.StatusCreated, record)
 }
 func (s *Server) handleTestAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
@@ -498,6 +565,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ a
 		return
 	}
 	record, _ := s.config.DB.GetMegaAccount(r.Context(), id)
+	s.events.Publish(events.Event{Name: events.AccountUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"id": id}})
 	writeJSON(w, 200, record)
 }
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
@@ -505,6 +573,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, _ a
 		writeError(w, 404, "account_not_found", "account was not found", nil)
 		return
 	}
+	s.events.Publish(events.Event{Name: events.AccountUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"id": r.PathValue("id"), "deleted": true}})
 	writeJSON(w, 200, map[string]bool{"deleted": true})
 }
 
@@ -567,6 +636,7 @@ func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request, _ aut
 		writeError(w, 400, "proxy_create_failed", err.Error(), nil)
 		return
 	}
+	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"proxyId": record.ID}})
 	writeJSON(w, http.StatusCreated, record)
 }
 func (s *Server) proxyClient(r *http.Request, id string) (*http.Client, error) {
@@ -643,6 +713,7 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, _ aut
 		s.transports.Remove(id)
 	}
 	record, _ := s.config.DB.GetProxyProfile(r.Context(), id)
+	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"proxyId": id}})
 	writeJSON(w, 200, record)
 }
 func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
@@ -654,6 +725,7 @@ func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, _ aut
 	if s.transports != nil {
 		s.transports.Remove(id)
 	}
+	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"proxyId": id, "deleted": true}})
 	writeJSON(w, 200, map[string]bool{"deleted": true})
 }
 
@@ -814,6 +886,12 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 			return
 		}
 	}
+	s.events.Publish(events.Event{
+		Name:      events.JobUpdated,
+		JobID:     record.ID,
+		Timestamp: time.Now().UTC(),
+		Data:      map[string]any{"id": record.ID, "totalBytes": record.TotalBytes, "bytesCommitted": int64(0)},
+	})
 	writeJSON(writer, http.StatusCreated, record)
 }
 
@@ -827,7 +905,36 @@ func (s *Server) handleListDownloads(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusInternalServerError, "database_error", "could not list downloads", nil)
 		return
 	}
+	for index := range records {
+		s.decorateDownload(&records[index])
+	}
 	writeJSON(writer, http.StatusOK, records)
+}
+
+func (s *Server) decorateDownload(record *store.DownloadJobRecord) {
+	if record == nil {
+		return
+	}
+	if s.downloads != nil {
+		snapshot := s.downloads.Speed(record.ID)
+		record.SpeedBytesPerSecond = snapshot.BytesPerSecond
+		remaining := record.TotalBytes - record.BytesCommitted
+		if remaining > 0 && snapshot.BytesPerSecond > 0 {
+			record.ETASeconds = int64(float64(remaining) / snapshot.BytesPerSecond)
+		}
+	}
+	if s.config.DB != nil {
+		if record.AccountID != "" {
+			if account, err := s.config.DB.GetMegaAccount(context.Background(), record.AccountID); err == nil {
+				record.AccountLabel = account.Label
+			}
+		}
+		if record.ProxyID != "" {
+			if proxy, err := s.config.DB.GetProxyProfile(context.Background(), record.ProxyID); err == nil {
+				record.ProxyLabel = proxy.Name
+			}
+		}
+	}
 }
 
 func (s *Server) handleGetDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
@@ -840,7 +947,7 @@ func (s *Server) handleGetDownload(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "download_invalid", "download id is required", nil)
 		return
 	}
-	record, err := s.config.DB.GetDownloadJob(request.Context(), id)
+	record, err := s.config.DB.GetDownloadJobDetail(request.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "download_not_found", "download was not found", nil)
 		return
@@ -849,7 +956,28 @@ func (s *Server) handleGetDownload(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusInternalServerError, "database_error", "could not read download", nil)
 		return
 	}
+	s.decorateDownload(&record)
 	writeJSON(writer, http.StatusOK, record)
+}
+
+func (s *Server) handleDownloadEvents(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.config.DB == nil {
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
+		return
+	}
+	if _, err := s.config.DB.GetDownloadJob(request.Context(), request.PathValue("id")); errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "download_not_found", "download was not found", nil)
+		return
+	} else if err != nil {
+		writeError(writer, http.StatusInternalServerError, "database_error", "could not read download", nil)
+		return
+	}
+	items, err := s.config.DB.ListDownloadEvents(request.Context(), request.PathValue("id"), 200)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "database_error", "could not read download events", nil)
+		return
+	}
+	writeJSON(writer, http.StatusOK, items)
 }
 
 func (s *Server) handlePauseDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
@@ -908,16 +1036,46 @@ func (s *Server) handleCancelDownload(writer http.ResponseWriter, request *http.
 	s.writeDownloadActionResult(writer, request)
 }
 
+func (s *Server) handleDeleteDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.config.DB == nil {
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
+		return
+	}
+	deleteFiles := false
+	if raw := request.URL.Query().Get("deleteFiles"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "delete_invalid", "deleteFiles must be true or false", nil)
+			return
+		}
+		deleteFiles = value
+	}
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	if err := s.downloads.DeleteJob(request.Context(), request.PathValue("id"), deleteFiles); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(writer, http.StatusNotFound, "download_not_found", "download was not found", nil)
+			return
+		}
+		writeError(writer, http.StatusBadRequest, "download_delete_failed", err.Error(), nil)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]bool{"deleted": true})
+}
+
 func (s *Server) writeDownloadActionResult(writer http.ResponseWriter, request *http.Request) {
 	if s.config.DB == nil {
 		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
 		return
 	}
-	record, err := s.config.DB.GetDownloadJob(request.Context(), request.PathValue("id"))
+	record, err := s.config.DB.GetDownloadJobDetail(request.Context(), request.PathValue("id"))
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "database_error", "could not read download after action", nil)
 		return
 	}
+	s.decorateDownload(&record)
 	writeJSON(writer, http.StatusOK, record)
 }
 
@@ -937,6 +1095,51 @@ func (s *Server) handleResumeQueue(writer http.ResponseWriter, _ *http.Request, 
 	}
 	s.downloads.ResumeQueue()
 	writeJSON(writer, http.StatusOK, map[string]bool{"paused": false})
+}
+
+func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		writeError(writer, http.StatusInternalServerError, "sse_unavailable", "the server does not support event streaming", nil)
+		return
+	}
+	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-cache, no-store")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Accel-Buffering", "no")
+	if _, err := io.WriteString(writer, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+	subscription := s.events.Subscribe(request.Context())
+	defer subscription.Close()
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-subscription.Done():
+			return
+		case event, open := <-subscription.Events():
+			if !open {
+				return
+			}
+			payload, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event.Name, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-keepAlive.C:
+			if _, err := io.WriteString(writer, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func randomID() string {

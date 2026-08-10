@@ -3,7 +3,8 @@ import { Activity, Download, LogOut, Settings2 } from "lucide-react";
 import { Link, Outlet, createRootRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { getAuthStatus, logout } from "@/api/client";
+import { getAuthStatus, getSettings, logout } from "@/api/client";
+import { EventStreamProvider } from "@/hooks/use-events";
 
 function RootLayout() {
   const { t } = useTranslation();
@@ -11,10 +12,18 @@ function RootLayout() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const authStatus = useQuery({ queryKey: ["auth-status"], queryFn: getAuthStatus, retry: false });
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: getSettings,
+    enabled: authStatus.data?.authenticated === true,
+  });
   const logoutMutation = useMutation({
     mutationFn: logout,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+      queryClient.setQueryData(["auth-status"], {
+        setupRequired: false,
+        authenticated: false,
+      });
       void navigate({ to: "/login" });
     },
   });
@@ -32,71 +41,87 @@ function RootLayout() {
     }
   }, [authStatus.data, location.pathname, navigate]);
 
+  useEffect(() => {
+    const theme = settings.data?.ui.theme ?? "system";
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.dataset.theme = theme;
+    };
+    apply();
+    if (theme !== "system") return;
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [settings.data?.ui.theme]);
+
   const publicRoute = location.pathname === "/setup" || location.pathname === "/login";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-7xl flex-col md:flex-row">
-        <aside className="border-b border-slate-800 bg-slate-900/60 md:w-64 md:border-r md:border-b-0">
-          <div className="flex items-center gap-3 px-6 py-5">
-            <span className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
-              <Activity aria-hidden="true" size={19} />
-            </span>
-            <div>
-              <p className="text-sm font-semibold">{t("app.name")}</p>
-              <p className="text-xs text-slate-500">{t("shell.version")}</p>
+    <EventStreamProvider enabled={authStatus.data?.authenticated === true}>
+      <div className="app-shell min-h-screen bg-slate-950 text-slate-100">
+        <div className="mx-auto flex min-h-screen max-w-7xl flex-col md:flex-row">
+          <aside className="border-b border-slate-800 bg-slate-900/60 md:w-64 md:border-r md:border-b-0">
+            <div className="flex items-center gap-3 px-6 py-5">
+              <span className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
+                <Activity aria-hidden="true" size={19} />
+              </span>
+              <div>
+                <p className="text-sm font-semibold">{t("app.name")}</p>
+                <p className="text-xs text-slate-500">{t("shell.version")}</p>
+              </div>
             </div>
-          </div>
-          <nav
-            aria-label={t("nav.navigation")}
-            className="flex gap-1 overflow-x-auto px-3 pb-3 md:flex-col md:px-3 md:pb-6"
-          >
-            {!publicRoute ? (
-              <>
-                <Link
-                  activeOptions={{ exact: true }}
-                  activeProps={{ className: "bg-slate-800 text-slate-100" }}
-                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
-                  to="/"
-                >
-                  <Activity aria-hidden="true" size={17} />
-                  {t("nav.dashboard")}
-                </Link>
-                <Link
-                  activeProps={{ className: "bg-slate-800 text-slate-100" }}
-                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
-                  to="/downloads"
-                >
-                  <Download aria-hidden="true" size={17} />
-                  {t("nav.downloads")}
-                </Link>
-                <Link
-                  activeProps={{ className: "bg-slate-800 text-slate-100" }}
-                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
-                  to="/settings"
-                >
-                  <Settings2 aria-hidden="true" size={17} />
-                  {t("nav.settings")}
-                </Link>
-              </>
-            ) : null}
-          </nav>
-          {!publicRoute && authStatus.data?.authenticated ? (
-            <button
-              className="mx-3 mb-5 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
-              type="button"
-              onClick={() => logoutMutation.mutate()}
+            <nav
+              aria-label={t("nav.navigation")}
+              className="flex gap-1 overflow-x-auto px-3 pb-3 md:flex-col md:px-3 md:pb-6"
             >
-              <LogOut aria-hidden="true" size={17} />
-              {t("auth.logout")}
-            </button>
-          ) : null}
-        </aside>
-        <main aria-label={t("shell.mainRegion")} className="flex-1 px-6 py-10 md:px-10">
-          <Outlet />
-        </main>
+              {!publicRoute ? (
+                <>
+                  <Link
+                    activeOptions={{ exact: true }}
+                    activeProps={{ className: "bg-slate-800 text-slate-100" }}
+                    className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
+                    to="/"
+                  >
+                    <Activity aria-hidden="true" size={17} />
+                    {t("nav.dashboard")}
+                  </Link>
+                  <Link
+                    activeProps={{ className: "bg-slate-800 text-slate-100" }}
+                    className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
+                    to="/downloads"
+                  >
+                    <Download aria-hidden="true" size={17} />
+                    {t("nav.downloads")}
+                  </Link>
+                  <Link
+                    activeProps={{ className: "bg-slate-800 text-slate-100" }}
+                    className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
+                    to="/settings"
+                  >
+                    <Settings2 aria-hidden="true" size={17} />
+                    {t("nav.settings")}
+                  </Link>
+                </>
+              ) : null}
+            </nav>
+            {!publicRoute && authStatus.data?.authenticated ? (
+              <button
+                className="mx-3 mb-5 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
+                type="button"
+                onClick={() => logoutMutation.mutate()}
+              >
+                <LogOut aria-hidden="true" size={17} />
+                {t("auth.logout")}
+              </button>
+            ) : null}
+          </aside>
+          <main aria-label={t("shell.mainRegion")} className="flex-1 px-6 py-10 md:px-10">
+            <Outlet />
+          </main>
+        </div>
       </div>
-    </div>
+    </EventStreamProvider>
   );
 }
 

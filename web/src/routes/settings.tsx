@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link } from "@tanstack/react-router";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 function SettingsPage() {
   const { t } = useTranslation();
+  const location = useLocation();
+  if (location.pathname !== "/settings") return <Outlet />;
   return (
     <section className="mx-auto w-full max-w-5xl space-y-6">
       <div>

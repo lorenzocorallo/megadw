@@ -55,6 +55,8 @@ export type Download = {
   accountId?: string;
   proxyId?: string;
   destinationSubdirectory: string;
+  completeRoot: string;
+  incompleteRoot: string;
   state: string;
   createdAt: string;
   updatedAt: string;
@@ -62,12 +64,38 @@ export type Download = {
   quotaRetryIndex?: number;
   lastErrorCode?: string;
   lastErrorMessage?: string;
+  bytesCommitted: number;
+  speedBytesPerSecond: number;
+  etaSeconds?: number;
+  accountLabel?: string;
+  proxyLabel?: string;
   files: Array<{
     id: string;
     finalRelativePath: string;
     sizeBytes: number;
+    bytesCommitted: number;
     state: string;
+    updatedAt?: string;
   }>;
+  events?: DownloadEvent[];
+};
+
+export type DownloadEvent = {
+  id: number;
+  jobId: string;
+  fileId?: string;
+  kind: string;
+  message: string;
+  createdAt: string;
+};
+
+export type Dashboard = {
+  activeJobs: number;
+  queuedJobs: number;
+  waitingQuotaJobs: number;
+  currentSpeedBytesPerSecond: number;
+  bytesDownloadedThisSession: number;
+  diskFreeBytes: number;
 };
 
 export type Account = {
@@ -178,11 +206,41 @@ export function createDownload(input: {
 export function listDownloads() {
   return apiRequest<Download[]>("/api/v1/downloads");
 }
+export function getDownload(id: string) {
+  return apiRequest<Download>(`/api/v1/downloads/${id}`);
+}
+export function listDownloadEvents(id: string) {
+  return apiRequest<DownloadEvent[]>(`/api/v1/downloads/${id}/events`);
+}
 export function resumeDownload(id: string) {
   return apiRequest<Download>(`/api/v1/downloads/${id}/resume`, { method: "POST", body: "{}" });
 }
 export function pauseDownload(id: string) {
   return apiRequest<Download>(`/api/v1/downloads/${id}/pause`, { method: "POST", body: "{}" });
+}
+export function retryDownload(id: string) {
+  return apiRequest<Download>(`/api/v1/downloads/${id}/retry`, { method: "POST", body: "{}" });
+}
+export function cancelDownload(id: string, deletePartialFiles = false) {
+  return apiRequest<Download>(`/api/v1/downloads/${id}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ deletePartialFiles }),
+  });
+}
+export function deleteDownload(id: string, deleteFiles: boolean) {
+  return apiRequest<{ deleted: boolean }>(
+    `/api/v1/downloads/${id}?deleteFiles=${String(deleteFiles)}`,
+    { method: "DELETE" },
+  );
+}
+export function pauseQueue() {
+  return apiRequest<{ paused: boolean }>("/api/v1/queue/pause", { method: "POST", body: "{}" });
+}
+export function resumeQueue() {
+  return apiRequest<{ paused: boolean }>("/api/v1/queue/resume", { method: "POST", body: "{}" });
+}
+export function getDashboard() {
+  return apiRequest<Dashboard>("/api/v1/dashboard");
 }
 
 export function listAccounts() {
@@ -204,6 +262,15 @@ export function testAccount(id: string) {
 }
 export function deleteAccount(id: string) {
   return apiRequest<{ deleted: boolean }>(`/api/v1/accounts/${id}`, { method: "DELETE" });
+}
+export function updateAccount(
+  id: string,
+  input: Partial<{ label: string; email: string; password: string; defaultForDownloads: boolean }>,
+) {
+  return apiRequest<Account>(`/api/v1/accounts/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }
 export function listProxies() {
   return apiRequest<ProxyProfile[]>("/api/v1/proxies");
@@ -229,4 +296,23 @@ export function testProxy(id: string) {
 }
 export function deleteProxy(id: string) {
   return apiRequest<{ deleted: boolean }>(`/api/v1/proxies/${id}`, { method: "DELETE" });
+}
+export function updateProxy(
+  id: string,
+  input: Partial<{
+    name: string;
+    type: string;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    timeoutSeconds: number;
+    enabled: boolean;
+    defaultForDownloads: boolean;
+  }>,
+) {
+  return apiRequest<ProxyProfile>(`/api/v1/proxies/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }

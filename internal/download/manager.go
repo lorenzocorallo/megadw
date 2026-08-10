@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lorenzocorallo/megadw/internal/events"
 	"github.com/lorenzocorallo/megadw/internal/fsroot"
 	"github.com/lorenzocorallo/megadw/internal/mega"
 	"github.com/lorenzocorallo/megadw/internal/network"
@@ -54,6 +55,7 @@ type Config struct {
 	ReadIdleTimeout                  time.Duration
 	NormalRetryLimit                 int
 	TransportPool                    *network.TransportPool
+	Events                           *events.Bus
 
 	Now func() time.Time
 }
@@ -133,6 +135,7 @@ type Manager struct {
 	readIdleTimeout  time.Duration
 	normalRetryLimit int
 	transportPool    *network.TransportPool
+	events           *events.Bus
 
 	mu             sync.Mutex
 	started        bool
@@ -282,6 +285,7 @@ func NewManager(config Config) (*Manager, error) {
 		readIdleTimeout:    config.ReadIdleTimeout,
 		normalRetryLimit:   config.NormalRetryLimit,
 		transportPool:      config.TransportPool,
+		events:             config.Events,
 		pending:            make(map[string]struct{}),
 		active:             make(map[string]struct{}),
 		controls:           make(map[string]*jobControl),
@@ -703,6 +707,8 @@ func (m *Manager) ResumeJob(ctx context.Context, jobID string) error {
 	if err := m.db.ClearDownloadQuotaState(ctx, jobID, string(JobQueued), m.now()); err != nil {
 		return err
 	}
+	_ = m.db.AddDownloadEvent(context.Background(), jobID, "", "state", "download queued for resume", m.now())
+	m.publishJobSnapshot(jobID)
 	return m.StartJob(jobID)
 }
 
@@ -782,6 +788,7 @@ func (m *Manager) enterWaitingQuota(job *store.DownloadJobRecord, file *store.Do
 		_ = m.db.UpdateDownloadFileState(context.Background(), store.DownloadFileStateUpdate{FileID: candidate.ID, State: string(FileWaiting), LastErrorCode: "quota_exhausted", LastErrorMessage: message, UpdatedAt: m.now()})
 	}
 	_ = m.db.AddDownloadEvent(context.Background(), job.ID, fileID(file), "warning", "MEGA quota exhausted; download is waiting", m.now())
+	m.publishJobSnapshot(job.ID)
 	m.scheduleQuotaRetry(job.ID, delay)
 	return nil
 }
@@ -831,6 +838,90 @@ func (m *Manager) Cancel(ctx context.Context, jobID string, deletePartialFiles b
 	return m.CancelJob(ctx, jobID, deletePartialFiles)
 }
 
+// DeleteJob removes durable metadata after the caller has made an explicit
+// decision about payload files. Unfinished jobs require deleteFiles=true so a
+// UI cannot accidentally strand a partial tree with no owning record.
+func (m *Manager) DeleteJob(ctx context.Context, jobID string, deleteFiles bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	job, err := m.db.GetDownloadJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if !deleteFiles && JobState(job.State) != JobCompleted {
+		return fmt.Errorf("deleteFiles must be true for an unfinished download")
+	}
+	m.mu.Lock()
+	_, active := m.active[jobID]
+	_, pending := m.pending[jobID]
+	m.mu.Unlock()
+	if active {
+		if err := m.CancelJob(ctx, jobID, deleteFiles); err != nil {
+			return err
+		}
+	} else if pending || !IsTerminalJobState(JobState(job.State)) {
+		m.mu.Lock()
+		delete(m.pending, jobID)
+		delete(m.pendingPrio, jobID)
+		delete(m.pendingSeq, jobID)
+		m.compactQueueLocked()
+		m.mu.Unlock()
+		if err := m.cancelPersistedJob(jobID, deleteFiles); err != nil {
+			return err
+		}
+	}
+	job, err = m.db.GetDownloadJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if deleteFiles {
+		if err := m.removePartialDirectory(job); err != nil {
+			return err
+		}
+		if err := removeCompletedFiles(job); err != nil {
+			return err
+		}
+	}
+	if err := m.db.DeleteDownloadJob(ctx, jobID); err != nil {
+		return err
+	}
+	if m.events != nil {
+		m.events.Publish(events.Event{Name: events.JobUpdated, JobID: jobID, Timestamp: m.now().UTC(), Data: map[string]any{"id": jobID, "deleted": true}})
+	}
+	return nil
+}
+
+func removeCompletedFiles(job store.DownloadJobRecord) error {
+	root, err := fsRoot(job.CompleteRoot)
+	if err != nil {
+		return err
+	}
+	for _, file := range job.Files {
+		if FileState(file.State) != FileCompleted || file.FinalRelativePath == "" {
+			continue
+		}
+		path, err := root.Join(file.FinalRelativePath)
+		if err != nil {
+			return err
+		}
+		info, statErr := os.Lstat(path)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return fmt.Errorf("inspect completed file: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to remove symlinked completed file")
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove completed file: %w", err)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) cancelPersistedJob(jobID string, deletePartialFiles bool) error {
 	job, err := m.db.GetDownloadJob(context.Background(), jobID)
 	if err != nil {
@@ -852,6 +943,8 @@ func (m *Manager) cancelPersistedJob(jobID string, deletePartialFiles bool) erro
 	if err := m.db.SetDownloadJobState(context.Background(), jobID, string(JobCancelled), m.now()); err != nil {
 		return err
 	}
+	_ = m.db.AddDownloadEvent(context.Background(), jobID, "", "state", "download cancelled", m.now())
+	m.publishJobSnapshot(jobID)
 	if deletePartialFiles {
 		if err := m.removePartialDirectory(job); err != nil {
 			return err
@@ -899,6 +992,7 @@ func (m *Manager) PauseQueue() {
 	}
 	m.signalLocked()
 	m.mu.Unlock()
+	m.publishQueueUpdate(true)
 }
 
 // ResumeQueue allows queued jobs to run and requeues jobs paused by the queue
@@ -917,6 +1011,7 @@ func (m *Manager) ResumeQueue() {
 	}
 	m.signalLocked()
 	m.mu.Unlock()
+	m.publishQueueUpdate(false)
 }
 
 // Speed returns the current bounded rolling speed for a job.
@@ -934,6 +1029,85 @@ func (m *Manager) Speed(jobID string) SpeedSnapshot {
 // value snapshot. The returned meter remains race-safe.
 func (m *Manager) SpeedMeter(jobID string) *SpeedMeter {
 	return m.getSpeedMeter(jobID)
+}
+
+// publishJobSnapshot emits a current durable snapshot for lifecycle changes.
+// It intentionally does not write through the bus synchronously: Bus.Publish
+// only updates bounded in-memory subscriber state and never waits for an SSE
+// writer.
+func (m *Manager) publishJobSnapshot(jobID string) {
+	if m.events == nil || jobID == "" {
+		return
+	}
+	job, err := m.db.GetDownloadJob(context.Background(), jobID)
+	if err != nil {
+		return
+	}
+	speed := m.Speed(jobID)
+	remaining := job.TotalBytes - job.BytesCommitted
+	eta := int64(0)
+	if remaining > 0 && speed.BytesPerSecond > 0 {
+		eta = int64(float64(remaining) / speed.BytesPerSecond)
+	}
+	files := make([]map[string]any, 0, len(job.Files))
+	for _, file := range job.Files {
+		files = append(files, map[string]any{
+			"id":             file.ID,
+			"state":          file.State,
+			"bytesCommitted": file.BytesCommitted,
+			"sizeBytes":      file.SizeBytes,
+			"updatedAt":      file.UpdatedAt,
+		})
+	}
+	m.events.Publish(events.Event{
+		Name:      events.JobUpdated,
+		JobID:     jobID,
+		Timestamp: m.now().UTC(),
+		Data: map[string]any{
+			"id":                  job.ID,
+			"state":               job.State,
+			"totalBytes":          job.TotalBytes,
+			"bytesCommitted":      job.BytesCommitted,
+			"speedBytesPerSecond": speed.BytesPerSecond,
+			"etaSeconds":          eta,
+			"updatedAt":           job.UpdatedAt,
+			"quotaNextRetryAt":    job.QuotaNextRetryAt,
+			"quotaRetryIndex":     job.QuotaRetryIndex,
+			"lastErrorCode":       job.LastErrorCode,
+			"lastErrorMessage":    job.LastErrorMessage,
+			"files":               files,
+		},
+	})
+}
+
+func (m *Manager) publishProgress(jobID, fileID, state string, committed, size int64) {
+	if m.events == nil || jobID == "" {
+		return
+	}
+	speed := m.Speed(jobID)
+	m.events.Publish(events.Event{
+		Name:      events.SpeedUpdated,
+		JobID:     jobID,
+		FileID:    fileID,
+		Timestamp: m.now().UTC(),
+		Data: map[string]any{
+			"id":                  jobID,
+			"downloadId":          jobID,
+			"fileId":              fileID,
+			"state":               state,
+			"bytesCommitted":      committed,
+			"sizeBytes":           size,
+			"speedBytesPerSecond": speed.BytesPerSecond,
+			"sessionBytes":        speed.TotalBytes,
+		},
+	})
+}
+
+func (m *Manager) publishQueueUpdate(paused bool) {
+	if m.events == nil {
+		return
+	}
+	m.events.Publish(events.Event{Name: events.QueueUpdated, Timestamp: m.now().UTC(), Data: map[string]any{"queuePaused": paused}})
 }
 
 func (m *Manager) getSpeedMeter(jobID string) *SpeedMeter {
@@ -987,6 +1161,8 @@ func (m *Manager) runJob(ctx context.Context, jobID string) error {
 		return err
 	}
 	job.State = string(JobDownloading)
+	_ = m.db.AddDownloadEvent(ctx, job.ID, "", "state", "download started", m.now())
+	m.publishJobSnapshot(job.ID)
 
 	pendingCount := 0
 	for index := range job.Files {
@@ -1120,6 +1296,7 @@ func (m *Manager) runJob(ctx context.Context, jobID string) error {
 		return err
 	}
 	job.State = string(JobFinalizing)
+	m.publishJobSnapshot(job.ID)
 	if err := TransitionJobState(JobState(job.State), JobCompleted); err != nil {
 		return err
 	}
@@ -1127,6 +1304,7 @@ func (m *Manager) runJob(ctx context.Context, jobID string) error {
 		return err
 	}
 	_ = m.db.AddDownloadEvent(ctx, job.ID, "", "completed", "download completed", m.now())
+	m.publishJobSnapshot(job.ID)
 	return nil
 }
 
@@ -1288,6 +1466,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 			committed += result.segment.Size()
 			bytesSinceCheckpoint += result.segment.Size()
 			dirty = true
+			m.publishProgress(job.ID, file.ID, string(FileDownloading), committed, file.SizeBytes)
 			if bytesSinceCheckpoint >= m.checkpointBytes {
 				if checkpointErr := checkpoint(); checkpointErr != nil {
 					transferErr = checkpointErr
@@ -1319,6 +1498,8 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	if err := m.db.UpdateDownloadFileState(ctx, store.DownloadFileStateUpdate{FileID: file.ID, State: string(FileVerifying), UpdatedAt: m.now()}); err != nil {
 		return err
 	}
+	file.State = string(FileVerifying)
+	m.publishJobSnapshot(job.ID)
 	if err := partial.Close(); err != nil {
 		return fmt.Errorf("close partial file before verification: %w", err)
 	}
@@ -1329,6 +1510,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 		}
 		_ = m.db.UpdateDownloadFileState(context.Background(), store.DownloadFileStateUpdate{FileID: file.ID, State: string(FileFailed), LastErrorCode: "integrity_mismatch", LastErrorMessage: err.Error(), UpdatedAt: m.now()})
 		_ = m.db.AddDownloadEvent(context.Background(), job.ID, file.ID, "error", "file integrity verification failed", m.now())
+		m.publishJobSnapshot(job.ID)
 		return err
 	}
 	finalRelativePath, err := m.finalize(ctx, job, file, partial.Path())
@@ -1341,6 +1523,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 			code = "cross_device_finalize"
 		}
 		_ = m.db.UpdateDownloadFileState(context.Background(), store.DownloadFileStateUpdate{FileID: file.ID, State: string(FileFailed), LastErrorCode: code, LastErrorMessage: err.Error(), UpdatedAt: m.now()})
+		m.publishJobSnapshot(job.ID)
 		return err
 	}
 	persistCtx := ctx
@@ -1354,6 +1537,8 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	}
 	file.State = string(FileCompleted)
 	file.FinalRelativePath = finalRelativePath
+	file.BytesCommitted = file.SizeBytes
+	m.publishJobSnapshot(job.ID)
 	return nil
 }
 
@@ -1546,6 +1731,7 @@ func (m *Manager) failJob(ctx context.Context, job *store.DownloadJobRecord, fil
 	if TransitionJobState(JobState(current.State), JobFailed) == nil {
 		_ = m.db.SetDownloadJobState(context.Background(), job.ID, string(JobFailed), m.now())
 	}
+	m.publishJobSnapshot(job.ID)
 	return cause
 }
 
@@ -1570,6 +1756,8 @@ func (m *Manager) pauseJob(ctx context.Context, job store.DownloadJobRecord) {
 	if TransitionJobState(JobState(current.State), JobPaused) == nil {
 		_ = m.db.SetDownloadJobState(ctx, job.ID, string(JobPaused), m.now())
 	}
+	_ = m.db.AddDownloadEvent(ctx, job.ID, "", "state", "download paused", m.now())
+	m.publishJobSnapshot(job.ID)
 }
 
 func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord) (bool, error) {

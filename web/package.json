@@ -8,6 +8,7 @@
     "build": "tsc -b && vp build",
     "check": "vp check",
     "test": "vp test",
+    "e2e": "vp exec playwright test",
     "lint": "vp lint",
     "format": "vp fmt",
     "preview": "vp preview"
@@ -33,6 +34,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "4.3.3",
     "@tanstack/router-plugin": "1.168.29",
     "@types/node": "26.2.0",

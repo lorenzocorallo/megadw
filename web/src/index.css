@@ -20,3 +20,46 @@ button,
 a {
   font: inherit;
 }
+
+button,
+a,
+input,
+select,
+textarea,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 2px;
+}
+
+html[data-theme="light"] .app-shell {
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+html[data-theme="light"] .app-shell .bg-slate-900\/60,
+html[data-theme="light"] .app-shell .bg-slate-900\/80 {
+  background-color: #ffffff;
+}
+
+html[data-theme="light"] .app-shell .bg-slate-950,
+html[data-theme="light"] .app-shell .bg-slate-950\/70 {
+  background-color: #f1f5f9;
+}
+
+html[data-theme="light"] .app-shell .text-slate-100,
+html[data-theme="light"] .app-shell .text-slate-200 {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .app-shell .text-slate-300 {
+  color: #334155;
+}
+
+html[data-theme="light"] .app-shell .text-slate-400,
+html[data-theme="light"] .app-shell .text-slate-500 {
+  color: #64748b;
+}

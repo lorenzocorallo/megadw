@@ -2,7 +2,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createAccount, deleteAccount, listAccounts, testAccount } from "@/api/client";
+import {
+  createAccount,
+  deleteAccount,
+  listAccounts,
+  testAccount,
+  updateAccount,
+  type Account,
+} from "@/api/client";
 
 function AccountsPage() {
   const { t } = useTranslation();
@@ -13,14 +20,18 @@ function AccountsPage() {
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
   const [defaultAccount, setDefaultAccount] = useState(false);
+  const [editingID, setEditingID] = useState<string | null>(null);
   const add = useMutation({
     mutationFn: () =>
-      createAccount({ label, email, password, defaultForDownloads: defaultAccount }),
+      editingID
+        ? updateAccount(editingID, { label, email, password, defaultForDownloads: defaultAccount })
+        : createAccount({ label, email, password, defaultForDownloads: defaultAccount }),
     onSuccess: () => {
       setLabel("");
       setEmail("");
       setPassword("");
       setDefaultAccount(false);
+      setEditingID(null);
       setMessage(t("pages.accounts.saved"));
       void client.invalidateQueries({ queryKey: ["accounts"] });
     },
@@ -35,6 +46,21 @@ function AccountsPage() {
     onSuccess: () => void client.invalidateQueries({ queryKey: ["accounts"] }),
     onError: (e: Error) => setMessage(e.message),
   });
+  const edit = (account: Account) => {
+    setEditingID(account.id);
+    setLabel(account.label);
+    setEmail(account.email);
+    setPassword("");
+    setDefaultAccount(account.defaultForDownloads);
+    setMessage("");
+  };
+  const reset = () => {
+    setEditingID(null);
+    setLabel("");
+    setEmail("");
+    setPassword("");
+    setDefaultAccount(false);
+  };
   return (
     <section className="space-y-6">
       <div>
@@ -52,6 +78,7 @@ function AccountsPage() {
           required
           value={label}
           onChange={(e) => setLabel(e.target.value)}
+          aria-label={t("pages.accounts.label")}
           placeholder={t("pages.accounts.label")}
           className="rounded border border-slate-700 bg-slate-950 px-3 py-2"
         />
@@ -60,22 +87,25 @@ function AccountsPage() {
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          aria-label={t("pages.accounts.email")}
           placeholder={t("pages.accounts.email")}
           className="rounded border border-slate-700 bg-slate-950 px-3 py-2"
         />
         <input
-          required
+          required={!editingID}
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          aria-label={t("pages.accounts.password")}
           placeholder={t("pages.accounts.password")}
           className="rounded border border-slate-700 bg-slate-950 px-3 py-2"
         />
         <button
           className="rounded bg-emerald-500 px-3 py-2 text-slate-950"
+          type="submit"
           disabled={add.isPending}
         >
-          {t("pages.accounts.add")}
+          {editingID ? t("pages.accounts.save") : t("pages.accounts.add")}
         </button>
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -85,6 +115,15 @@ function AccountsPage() {
           />
           {t("pages.accounts.default")}
         </label>
+        {editingID ? (
+          <button
+            className="text-left text-sm text-slate-400 underline"
+            type="button"
+            onClick={reset}
+          >
+            {t("pages.accounts.cancelEdit")}
+          </button>
+        ) : null}
       </form>
       {message && (
         <p role="status" className="text-sm text-amber-300">
@@ -95,10 +134,18 @@ function AccountsPage() {
         <table className="w-full text-left text-sm">
           <thead>
             <tr className="border-b border-slate-800 text-slate-400">
-              <th className="p-3">{t("pages.accounts.label")}</th>
-              <th className="p-3">{t("pages.accounts.email")}</th>
-              <th className="p-3">{t("pages.accounts.status")}</th>
-              <th className="p-3">{t("pages.accounts.actions")}</th>
+              <th className="p-3" scope="col">
+                {t("pages.accounts.label")}
+              </th>
+              <th className="p-3" scope="col">
+                {t("pages.accounts.email")}
+              </th>
+              <th className="p-3" scope="col">
+                {t("pages.accounts.status")}
+              </th>
+              <th className="p-3" scope="col">
+                {t("pages.accounts.actions")}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -106,12 +153,32 @@ function AccountsPage() {
               <tr key={account.id} className="border-b border-slate-900">
                 <td className="p-3">{account.label}</td>
                 <td className="p-3">{account.email}</td>
-                <td className="p-3">{account.status}</td>
+                <td className="p-3">
+                  {t(`pages.accounts.statuses.${account.status}`, { defaultValue: account.status })}
+                </td>
                 <td className="flex gap-2 p-3">
-                  <button className="text-emerald-300" onClick={() => test.mutate(account.id)}>
+                  <button
+                    className="text-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                    type="button"
+                    onClick={() => test.mutate(account.id)}
+                  >
                     {t("pages.accounts.test")}
                   </button>
-                  <button className="text-rose-300" onClick={() => remove.mutate(account.id)}>
+                  <button
+                    className="text-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                    type="button"
+                    onClick={() => edit(account)}
+                  >
+                    {t("pages.accounts.edit")}
+                  </button>
+                  <button
+                    className="text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(t("pages.accounts.confirmRemove")))
+                        remove.mutate(account.id);
+                    }}
+                  >
                     {t("pages.accounts.remove")}
                   </button>
                 </td>

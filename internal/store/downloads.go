@@ -43,27 +43,33 @@ type DownloadFileInput struct {
 }
 
 type DownloadJobRecord struct {
-	ID                  string               `json:"id"`
-	SourceKind          string               `json:"sourceKind"`
-	SourceHandle        string               `json:"sourceHandle"`
-	SourceSelectedPath  string               `json:"-"`
-	SourceSelectedNode  string               `json:"-"`
-	DisplayName         string               `json:"displayName"`
-	TotalBytes          int64                `json:"totalBytes"`
-	AccountID           string               `json:"accountId,omitempty"`
-	ProxyID             string               `json:"proxyId,omitempty"`
-	DestinationSubdir   string               `json:"destinationSubdirectory"`
-	CompleteRoot        string               `json:"completeRoot"`
-	IncompleteRoot      string               `json:"incompleteRoot"`
-	State               string               `json:"state"`
-	CreatedAt           time.Time            `json:"createdAt"`
-	UpdatedAt           time.Time            `json:"updatedAt"`
-	QuotaNextRetryAt    *time.Time           `json:"quotaNextRetryAt,omitempty"`
-	QuotaRetryIndex     int                  `json:"quotaRetryIndex,omitempty"`
-	LastErrorCode       string               `json:"lastErrorCode,omitempty"`
-	LastErrorMessage    string               `json:"lastErrorMessage,omitempty"`
-	SourceKeyCiphertext []byte               `json:"-"`
-	Files               []DownloadFileRecord `json:"files"`
+	ID                  string                `json:"id"`
+	SourceKind          string                `json:"sourceKind"`
+	SourceHandle        string                `json:"sourceHandle"`
+	SourceSelectedPath  string                `json:"-"`
+	SourceSelectedNode  string                `json:"-"`
+	DisplayName         string                `json:"displayName"`
+	TotalBytes          int64                 `json:"totalBytes"`
+	AccountID           string                `json:"accountId,omitempty"`
+	ProxyID             string                `json:"proxyId,omitempty"`
+	DestinationSubdir   string                `json:"destinationSubdirectory"`
+	CompleteRoot        string                `json:"completeRoot"`
+	IncompleteRoot      string                `json:"incompleteRoot"`
+	State               string                `json:"state"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
+	QuotaNextRetryAt    *time.Time            `json:"quotaNextRetryAt,omitempty"`
+	QuotaRetryIndex     int                   `json:"quotaRetryIndex,omitempty"`
+	LastErrorCode       string                `json:"lastErrorCode,omitempty"`
+	LastErrorMessage    string                `json:"lastErrorMessage,omitempty"`
+	BytesCommitted      int64                 `json:"bytesCommitted"`
+	SpeedBytesPerSecond float64               `json:"speedBytesPerSecond"`
+	ETASeconds          int64                 `json:"etaSeconds,omitempty"`
+	AccountLabel        string                `json:"accountLabel,omitempty"`
+	ProxyLabel          string                `json:"proxyLabel,omitempty"`
+	SourceKeyCiphertext []byte                `json:"-"`
+	Files               []DownloadFileRecord  `json:"files"`
+	Events              []DownloadEventRecord `json:"events,omitempty"`
 }
 
 type DownloadFileRecord struct {
@@ -108,6 +114,15 @@ type DownloadFileStateUpdate struct {
 	LastErrorCode    string
 	LastErrorMessage string
 	UpdatedAt        time.Time
+}
+
+type DownloadEventRecord struct {
+	ID        int64     `json:"id"`
+	JobID     string    `json:"jobId"`
+	FileID    string    `json:"fileId,omitempty"`
+	Kind      string    `json:"kind"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (d *DB) InsertDownloadJob(ctx context.Context, input DownloadJobInput) (DownloadJobRecord, error) {
@@ -254,11 +269,75 @@ func (d *DB) GetDownloadJob(ctx context.Context, id string) (DownloadJobRecord, 
 		file.FileKeyCiphertext = append([]byte(nil), file.FileKeyCiphertext...)
 		file.PayloadURLCiphertext = append([]byte(nil), file.PayloadURLCiphertext...)
 		record.Files = append(record.Files, file)
+		record.BytesCommitted += file.BytesCommitted
 	}
 	if err := rows.Err(); err != nil {
 		return DownloadJobRecord{}, fmt.Errorf("read download file rows: %w", err)
 	}
 	return record, nil
+}
+
+// GetDownloadJobDetail returns the durable job snapshot plus the bounded
+// diagnostic history used by the detail page. The normal list path avoids
+// loading history for every persisted job.
+func (d *DB) GetDownloadJobDetail(ctx context.Context, id string) (DownloadJobRecord, error) {
+	record, err := d.GetDownloadJob(ctx, id)
+	if err != nil {
+		return DownloadJobRecord{}, err
+	}
+	record.Events, err = d.ListDownloadEvents(ctx, id, 200)
+	if err != nil {
+		return DownloadJobRecord{}, err
+	}
+	return record, nil
+}
+
+func (d *DB) ListDownloadEvents(ctx context.Context, jobID string, limit int) ([]DownloadEventRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := d.QueryContext(ctx, `SELECT id, job_id, COALESCE(file_id, ''), kind, message, created_at
+		FROM download_events WHERE job_id = ? ORDER BY id DESC LIMIT ?`, jobID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list download events: %w", err)
+	}
+	defer rows.Close()
+	items := make([]DownloadEventRecord, 0, limit)
+	for rows.Next() {
+		var item DownloadEventRecord
+		var created string
+		if err := rows.Scan(&item.ID, &item.JobID, &item.FileID, &item.Kind, &item.Message, &created); err != nil {
+			return nil, fmt.Errorf("scan download event: %w", err)
+		}
+		item.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, fmt.Errorf("parse download event timestamp: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read download event rows: %w", err)
+	}
+	// Detail pages read oldest-to-newest so the event list is chronological.
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+	return items, nil
+}
+
+func (d *DB) DeleteDownloadJob(ctx context.Context, id string) error {
+	result, err := d.ExecContext(ctx, `DELETE FROM download_jobs WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete download job %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check deleted download job %q: %w", id, err)
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (d *DB) ListDownloadJobs(ctx context.Context) ([]DownloadJobRecord, error) {

@@ -37,7 +37,7 @@ func main() {
 		slog.Error("load embedded web UI", "error", err)
 		os.Exit(1)
 	}
-	apiHandler := api.New(api.Config{DB: application.DB, Secrets: application.Secrets, Settings: application.Settings, Auth: application.Auth, Mega: application.Mega, Downloads: application.Downloads, Transports: application.Transports})
+	apiHandler := api.New(api.Config{DB: application.DB, Secrets: application.Secrets, Settings: application.Settings, Auth: application.Auth, Mega: application.Mega, Downloads: application.Downloads, Transports: application.Transports, Events: application.Events})
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/", apiHandler)
 	mux.Handle("/", staticHandler)
@@ -47,8 +47,10 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// SSE responses are intentionally long-lived. Handler-level bounded
+		// request work and IdleTimeout still protect ordinary API calls.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	slog.Info("megad listening", "address", server.Addr)

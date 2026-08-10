@@ -7,7 +7,7 @@ EMBED_DIR := internal/webui/dist
 OUTPUT_DIR := dist
 OUTPUT_BINARY := $(OUTPUT_DIR)/megad
 
-.PHONY: dev check test test-live build clean web-install web-check web-test web-build backend-test
+.PHONY: dev check test test-live build clean web-install web-check web-test web-e2e web-build backend-test
 
 dev:
 	cd $(WEB_DIR) && $(VP) dev
@@ -20,6 +20,9 @@ web-check: web-install
 
 web-test: web-install
 	cd $(WEB_DIR) && $(VP) test
+
+web-e2e: web-install
+	cd $(WEB_DIR) && $(VP) exec playwright test
 
 web-build: web-install
 	cd $(WEB_DIR) && $(VP) build

@@ -47,3 +47,7 @@ jobs:
         run: vp test
       - name: Build frontend
         run: vp build
+      - name: Install Chromium for browser tests
+        run: vp exec playwright install --with-deps chromium
+      - name: Browser E2E
+        run: vp exec playwright test

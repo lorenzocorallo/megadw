@@ -91,6 +91,11 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
               }
             />
           </Field>
+          {!value.paths.completeRoot || !value.paths.incompleteRoot ? (
+            <p className="text-sm text-amber-300" role="alert">
+              {t("settings.transferRootsRequired")}
+            </p>
+          ) : null}
           <Field label={t("settings.conflictPolicy")}>
             <select
               className={inputClass}

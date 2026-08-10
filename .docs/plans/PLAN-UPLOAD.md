@@ -2,7 +2,7 @@
 
 Status: deferred; do not execute during downloader MVP
 Dependency: main `PLAN.md` must be complete, released, and stable first
-Resource target: must coexist with the downloader inside the same 2 vCPU / 4 GiB minimum LXC without unbounded worker, buffer, or queue growth
+Resource target: must coexist with the downloader inside the same 2 vCPU / 4 GiB minimum resource profile without unbounded worker, buffer, or queue growth
 
 ## Goal
 

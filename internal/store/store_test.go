@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,7 +132,8 @@ func TestSettingsRestartAndAtomicValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	value.UI.Theme = "dark"
-	value.Paths.CompleteRoot = filepath.Join(t.TempDir(), "complete")
+	value.Paths.IncompleteRoot = filepath.Join(t.TempDir(), "operator-selected-partial")
+	value.Paths.CompleteRoot = filepath.Join(t.TempDir(), "operator-selected-complete")
 	if err := service.Update(context.Background(), value); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +151,39 @@ func TestSettingsRestartAndAtomicValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.UI.Theme != "dark" || reloaded.Paths.CompleteRoot != value.Paths.CompleteRoot {
+	if reloaded.UI.Theme != "dark" || reloaded.Paths != value.Paths || !reloaded.Paths.Configured() {
 		t.Fatalf("reloaded settings = %#v", reloaded)
+	}
+}
+
+func TestPersistedExplicitTransferRootsAreNotRewrittenOnUpgrade(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "megad.sqlite3")
+	db, err := store.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	legacyPaths := settings.PathsSettings{
+		IncompleteRoot: "/srv/legacy-transfer/partial",
+		CompleteRoot:   "/srv/legacy-transfer/complete",
+	}
+	encodedPaths, err := json.Marshal(legacyPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplaceSettings(context.Background(), map[string][]byte{"paths": encodedPaths}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	service, err := settings.NewService(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := service.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Paths != legacyPaths || !reloaded.Paths.Configured() {
+		t.Fatalf("persisted roots changed: got %#v, want %#v", reloaded.Paths, legacyPaths)
 	}
 }

@@ -20,6 +20,8 @@ jobs:
           check-latest: true
       - name: Test backend
         run: go test ./...
+      - name: Audit native systemd hardening
+        run: sh scripts/audit-systemd.sh
 
   frontend:
     runs-on: ubuntu-latest
@@ -51,3 +53,13 @@ jobs:
         run: vp exec playwright install --with-deps chromium
       - name: Browser E2E
         run: vp exec playwright test
+
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Validate Compose file
+        run: docker compose --env-file packaging/megad.compose.env.example -f compose.yaml config --quiet
+      - name: Build and smoke-test Docker deployment
+        run: MEGADW_DOCKER_IMAGE=megadw:ci make docker-smoke

@@ -2,7 +2,7 @@
 
 Status: deferred; do not execute during downloader MVP
 Dependency: main `PLAN.md` must be released and stable first
-Resource target: streaming must remain bounded on the same 2 vCPU / 4 GiB minimum LXC and share global network/resource budgets with downloads
+Resource target: streaming must remain bounded on the same 2 vCPU / 4 GiB minimum resource profile and share global network/resource budgets with downloads
 
 ## Goal
 

@@ -228,6 +228,7 @@
   "settings": {
     "completeRoot": "Complete root",
     "incompleteRoot": "Incomplete root",
+    "transferRootsRequired": "Set both transfer roots before adding downloads. They are never inferred.",
     "conflictPolicy": "Conflict policy",
     "conflict": {
       "rename": "Rename with a numeric suffix",

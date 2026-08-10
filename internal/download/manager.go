@@ -377,6 +377,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	for _, job := range jobs {
 		if job.State == string(JobQueued) || (job.State == string(JobPausedRecovery) && autoStart) {
+			if err := validateTransferRoots(job); err != nil {
+				// A fresh install has no queued jobs, while an upgrade may have
+				// jobs with their own persisted roots. Never start a job whose
+				// durable roots are missing or invalid.
+				if errors.Is(err, ErrTransferRootsNotConfigured) {
+					continue
+				}
+				return err
+			}
 			if job.State == string(JobPausedRecovery) {
 				_ = m.db.SetDownloadJobState(ctx, job.ID, string(JobQueued), m.now())
 			}
@@ -407,6 +416,13 @@ func (m *Manager) StartJob(jobID string) error {
 func (m *Manager) StartJobWithPriority(jobID string, priority int) error {
 	if jobID == "" {
 		return fmt.Errorf("download job id is required")
+	}
+	job, err := m.db.GetDownloadJob(context.Background(), jobID)
+	if err != nil {
+		return err
+	}
+	if err := validateTransferRoots(job); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -795,6 +811,9 @@ func (m *Manager) ResumeJob(ctx context.Context, jobID string) error {
 
 	job, err := m.db.GetDownloadJob(ctx, jobID)
 	if err != nil {
+		return err
+	}
+	if err := validateTransferRoots(job); err != nil {
 		return err
 	}
 	state := JobState(job.State)
@@ -1977,9 +1996,31 @@ func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRe
 }
 
 var (
-	ErrCrossDevice         = errors.New("incomplete and complete roots must share a filesystem")
-	ErrFinalizationPending = errors.New("atomic rename succeeded but completion persistence is pending")
+	ErrTransferRootsNotConfigured = errors.New("transfer roots are not configured")
+	ErrCrossDevice                = errors.New("incomplete and complete roots must share a filesystem")
+	ErrFinalizationPending        = errors.New("atomic rename succeeded but completion persistence is pending")
 )
+
+func validateTransferRoots(job store.DownloadJobRecord) error {
+	if job.CompleteRoot == "" || job.IncompleteRoot == "" {
+		return fmt.Errorf("%w for download %q", ErrTransferRootsNotConfigured, job.ID)
+	}
+	completeRoot, err := fsroot.New(job.CompleteRoot)
+	if err != nil {
+		return fmt.Errorf("invalid complete root for download %q: %w", job.ID, err)
+	}
+	if err := completeRoot.Close(); err != nil {
+		return fmt.Errorf("close complete root for download %q: %w", job.ID, err)
+	}
+	incompleteRoot, err := fsroot.New(job.IncompleteRoot)
+	if err != nil {
+		return fmt.Errorf("invalid incomplete root for download %q: %w", job.ID, err)
+	}
+	if err := incompleteRoot.Close(); err != nil {
+		return fmt.Errorf("close incomplete root for download %q: %w", job.ID, err)
+	}
+	return nil
+}
 
 func (m *Manager) finalize(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord, partialRelative string) (string, error) {
 	incompleteRoot, err := fsRoot(job.IncompleteRoot)

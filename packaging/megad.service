@@ -31,7 +31,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=true
 RestrictNamespaces=true
 PrivateDevices=true
-ReadWritePaths=/var/lib/megad /mnt/media/downloads/mega
+# Transfer roots are deliberately not baked into the unit. Add the two
+# explicitly configured roots in a megad.service drop-in after setup; keeping
+# this allow-list narrow preserves ProtectSystem=strict for the native install.
+ReadWritePaths=/var/lib/megad
 
 [Install]
 WantedBy=multi-user.target

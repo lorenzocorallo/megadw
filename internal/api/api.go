@@ -169,7 +169,19 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 	if database != "ok" {
 		status = "degraded"
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"status": status, "version": s.config.Version, "database": database, "downloadManager": "ok"})
+	transferPathsConfigured := false
+	if s.settings != nil {
+		if value, err := s.settings.Get(request.Context()); err == nil {
+			transferPathsConfigured = value.Paths.Configured()
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"status":                  status,
+		"version":                 s.config.Version,
+		"database":                database,
+		"downloadManager":         "ok",
+		"transferPathsConfigured": transferPathsConfigured,
+	})
 }
 
 func (s *Server) handleVersion(writer http.ResponseWriter, _ *http.Request) {
@@ -841,6 +853,27 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 	if !decodeJSON(writer, request, &input, maxResolveBody) {
 		return
 	}
+	if s.config.Secrets == nil || s.settings == nil || s.config.DB == nil {
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
+		return
+	}
+	currentSettings, err := s.settings.Get(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "settings_error", "could not read settings", nil)
+		return
+	}
+	if !currentSettings.Paths.Configured() {
+		writeError(writer, http.StatusConflict, "transfer_paths_unconfigured", "configure both transfer roots before creating a download", nil)
+		return
+	}
+	if err := validateTransferRoot(currentSettings.Paths.CompleteRoot); err != nil {
+		writeError(writer, http.StatusBadRequest, "settings_invalid", "configured complete root is invalid", nil)
+		return
+	}
+	if err := validateTransferRoot(currentSettings.Paths.IncompleteRoot); err != nil {
+		writeError(writer, http.StatusBadRequest, "settings_invalid", "configured incomplete root is invalid", nil)
+		return
+	}
 	if input.AccountID != "" {
 		if _, err := s.config.DB.GetMegaAccount(request.Context(), input.AccountID); err != nil {
 			writeError(writer, http.StatusBadRequest, "account_invalid", "selected account was not found", nil)
@@ -862,15 +895,6 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 	link, job, _, err := s.resolve(request.Context(), resolveRequest{URL: input.URL, AccountID: input.AccountID, ProxyID: input.ProxyID})
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, errorCode(err), err.Error(), nil)
-		return
-	}
-	if s.config.Secrets == nil || s.settings == nil || s.config.DB == nil {
-		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
-		return
-	}
-	currentSettings, err := s.settings.Get(request.Context())
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "settings_error", "could not read settings", nil)
 		return
 	}
 	sourceCiphertext, err := s.config.Secrets.Encrypt([]byte(link.Key))
@@ -979,6 +1003,14 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		Data:      map[string]any{"id": record.ID, "totalBytes": record.TotalBytes, "bytesCommitted": int64(0)},
 	})
 	writeJSON(writer, http.StatusCreated, record)
+}
+
+func validateTransferRoot(path string) error {
+	root, err := fsroot.New(path)
+	if err != nil {
+		return err
+	}
+	return root.Close()
 }
 
 func (s *Server) handleListDownloads(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {

@@ -15,7 +15,8 @@ run_with_constraints() {
 	(
 		# The cgroup hierarchy is the preferred release constraint. When it is
 		# unavailable, cap virtual address space as a reproducible fallback;
-		# the benchmark still reports host RSS rather than calling this LXC.
+		# the benchmark still reports host RSS rather than calling this a
+		# constrained-container result.
 		ulimit -v "$memory_limit_kib" 2>/dev/null || true
 		if command -v taskset >/dev/null 2>&1 && [ "$ONLINE_CPUS" -ge "$required_cpus" ] 2>/dev/null; then
 			MEGADW_RESOURCE_CONSTRAINT="taskset CPU affinity $affinity; virtual memory limit ${memory_limit_kib}KiB; no child cgroup memory limit was available" taskset -c "$affinity" "$BINARY" --profile "$profile" --fixture-binary "$FIXTURE" "$@"

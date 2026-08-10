@@ -3,6 +3,7 @@ SHELL := /bin/sh
 GO ?= go
 VP ?= vp
 GOVULNCHECK ?= govulncheck
+DOCKER ?= docker
 WEB_DIR := web
 EMBED_DIR := internal/webui/dist
 OUTPUT_DIR := dist
@@ -15,7 +16,7 @@ COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 GO_LDFLAGS ?= -X github.com/lorenzocorallo/megadw/internal/buildinfo.Version=$(VERSION) -X github.com/lorenzocorallo/megadw/internal/buildinfo.Commit=$(COMMIT) -X github.com/lorenzocorallo/megadw/internal/buildinfo.BuildTime=$(BUILD_TIME)
 
-.PHONY: dev check test test-live build clean web-install web-check web-test web-e2e web-build backend-test audit security graceful-shutdown resource-benchmark production-smoke
+.PHONY: dev check test test-live build clean web-install web-check web-test web-e2e web-build backend-test audit security graceful-shutdown resource-benchmark production-smoke docker-build docker-smoke
 
 dev:
 	cd $(WEB_DIR) && $(VP) dev
@@ -73,6 +74,12 @@ resource-benchmark:
 
 production-smoke: build
 	GO="$(GO)" sh scripts/production-smoke.sh $(OUTPUT_BINARY)
+
+docker-build:
+	$(DOCKER) build --tag megad:local .
+
+docker-smoke:
+	DOCKER="$(DOCKER)" sh scripts/docker-smoke.sh
 
 clean:
 	rm -rf $(OUTPUT_DIR) $(WEB_DIR)/dist

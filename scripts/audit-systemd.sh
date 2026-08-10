@@ -21,7 +21,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/var/lib/megad /mnt/media/downloads/mega'
+ReadWritePaths=/var/lib/megad'
 
 printf '%s\n' "$required" | while IFS= read -r line; do
 	if ! grep -Fqx "$line" "$unit"; then
@@ -32,6 +32,12 @@ done
 
 if grep -Eq '^PrivateNetwork=(true|yes|1)$' "$unit"; then
 	echo 'PrivateNetwork must remain disabled: MEGA downloads need outbound networking' >&2
+	exit 1
+fi
+
+read_write_paths=$(grep -Ec '^ReadWritePaths=' "$unit")
+if [ "$read_write_paths" -ne 1 ]; then
+	echo 'systemd unit must contain only its state ReadWritePaths allow-list; add transfer roots in a drop-in' >&2
 	exit 1
 fi
 

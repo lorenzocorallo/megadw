@@ -3,10 +3,10 @@
 Status: implementation-ready MVP plan, revised 2026-08-08
 Primary scope: high-performance MEGA downloading only
 Out of scope for this plan: upload, streaming, *arr integration, cloud file browser
-Deployment target: Debian/Ubuntu LXC, systemd, single self-contained application process
+Deployment target: Docker/Compose first; native Linux binary + systemd second; LXC/Proxmox optional
 Resource target: 2 vCPU / 4 GiB RAM minimum; 4 vCPU / 8 GiB RAM maximum target profile
 Design priority: correctness and recoverability first, then measured throughput, then UI polish
-Default download destination: `/mnt/media/downloads/mega/complete`
+Transfer roots have no defaults and must be explicitly configured by the operator.
 
 ## 0. Non-negotiable product decisions
 
@@ -27,14 +27,14 @@ The implementation agents MUST follow these decisions. Do not substitute librari
 13. HTTP API: standard JSON REST under `/api/v1`.
 14. Logging: Go `log/slog`; human-readable text to stdout for systemd/journald. Do not store verbose progress logs in SQLite.
 15. Packaging: one Go binary containing the built React assets with `go:embed`.
-16. Linux service: systemd unit. Docker may be added later but is not required for MVP.
+16. Deployment: Docker/Compose is the primary production deployment. A native Linux binary with systemd remains the supported secondary deployment. LXC/Proxmox is only an optional host environment; it is not an application or filesystem assumption.
 17. License: GPL-3.0 for the initial repository because MegaBasterd is GPL-3.0 and this project is explicitly a port/reference implementation. Keep third-party license notices. If a different license is desired later, perform a deliberate clean-room review first.
 18. MEGA transfer limits: the application MUST be quota-aware and resume reliably after MEGA permits transfers again. It MUST NOT automatically rotate IPs, proxy identities, or accounts in response to quota errors for the purpose of bypassing MEGA transfer limits. Proxy support is for explicit network routing. HTTP 509 / over-quota states cause pause/backoff/retry, not identity rotation.
-19. Default paths:
-    - incomplete: `/mnt/media/downloads/mega/incomplete`
-    - complete: `/mnt/media/downloads/mega/complete`
-    - state: `/var/lib/megad`
-    - database: `/var/lib/megad/megad.sqlite3`
+19. Storage paths:
+    - incomplete and complete transfer roots: no defaults; both must be explicitly configured as valid absolute paths before transfers are enabled;
+    - application state: `/var/lib/megad` by default;
+    - database: `/var/lib/megad/megad.sqlite3` by default.
+      Application state is separate from transfer storage. Existing persisted job roots and files are never moved automatically during upgrade.
 20. Partial download storage: one sparse `.mega.part` file per remote file. Never create one temporary file per chunk. Never require a second full-size copy for merging.
 21. A completed file is moved from `incomplete` to `complete` with an atomic rename. The two paths MUST be on the same filesystem; detect and warn if they are not.
 22. Frontier dependency policy: use bleeding-edge technology only when its blast radius is bounded. Stable releases may be core dependencies; beta/pre-1.0 dependencies must be exact-pinned, isolated behind local boundaries, and replaceable without changing domain or API contracts.
@@ -59,6 +59,9 @@ Create these package boundaries. The named top-level and `internal/` packages ar
 ```text
 /
   README.md
+  Dockerfile
+  compose.yaml
+  .dockerignore
   LICENSE
   NOTICE.md
   PLAN.md
@@ -166,6 +169,7 @@ Create these package boundaries. The named top-level and `internal/` packages ar
   packaging/
     megad.service
     megad.env.example
+    megad.compose.env.example
 ```
 
 Generated files may add to this tree. Keep the major package boundaries stable, but agents may refactor filenames inside a package when tests and imports remain coherent.
@@ -213,7 +217,8 @@ Startup sequence:
 3. Open SQLite.
 4. Enable WAL mode, foreign keys, and a busy timeout.
 5. Run migrations.
-6. Load settings and validate download paths.
+6. Load settings; keep empty transfer roots valid for first-run setup and
+   validate any configured transfer roots before transfer work is enabled.
 7. Initialize secret encryption key.
 8. Rehydrate downloads from SQLite.
 9. Convert any persisted `downloading`, `resolving`, or `finalizing` state to `paused_recovery`.
@@ -1013,8 +1018,8 @@ Required backend settings with defaults:
 ```json
 {
   "paths": {
-    "incompleteRoot": "/mnt/media/downloads/mega/incomplete",
-    "completeRoot": "/mnt/media/downloads/mega/complete"
+    "incompleteRoot": "",
+    "completeRoot": ""
   },
   "downloads": {
     "autoStart": true,
@@ -1052,7 +1057,7 @@ Mandatory rules:
 2. Browser supplies only an optional relative subdirectory under the configured complete root.
 3. Use `filepath.Rel` containment checks after joining paths.
 4. Symlink escape: before writing, walk/create controlled parent directories and reject any existing symlink in the path between root and target.
-5. Bind address default: `127.0.0.1:8080`. LXC/LAN deployments opt in explicitly to `0.0.0.0:8080` (or a specific LAN address) after the admin bootstrap is understood. README must document reverse-proxy/VPN/LAN exposure. Never trust `X-Forwarded-*` headers unless the peer is in an explicitly configured trusted-proxy list.
+5. Bind address default: `127.0.0.1:8080`. Docker/LAN deployments opt in explicitly to `0.0.0.0:8080` (or a specific LAN address) after the admin bootstrap is understood. README must document reverse-proxy/VPN/LAN exposure. Never trust `X-Forwarded-*` headers unless the peer is in an explicitly configured trusted-proxy list.
 6. Apply request body size limits. Link-add request maximum 256 KiB.
 7. HTTP server timeouts must be explicit.
 8. Never expose a generic filesystem browser endpoint.
@@ -1086,7 +1091,8 @@ These are acceptance targets, not reasons to weaken integrity or resume correctn
 
 ### 21.1 Resource-profile acceptance
 
-Benchmark both supported LXC profiles before release:
+Benchmark both supported resource profiles before release, using a cgroup,
+container, or equivalent constrained host:
 
 ```text
 small:  2 vCPU / 4 GiB RAM
@@ -1186,6 +1192,21 @@ Required E2E flows:
 11. SSE disconnect/reconnect does not lose current status.
 12. Dark/light/system theme switch.
 
+### 22.5 Deployment and configuration tests
+
+Required release checks:
+
+1. Fresh application state contains no implicit transfer roots and rejects
+   download creation until both roots are configured.
+2. Arbitrary valid absolute roots are accepted and used without weakening
+   traversal, symlink, or same-filesystem atomic-rename checks.
+3. Explicit persisted settings and per-job roots survive restart and upgrade
+   unchanged; no user files are moved.
+4. Docker builds from the frozen frontend lockfile, runs as non-root without
+   privileged mode, becomes healthy, persists state, and exits cleanly on
+   SIGTERM.
+5. Native binary installation and systemd hardening/audit checks pass.
+
 ## 23. Observability
 
 Use structured `slog` fields even with text output:
@@ -1280,19 +1301,35 @@ make clean
 
 Production must not require Node or Java.
 
-## 25. systemd/LXC packaging
+## 25. Docker/Compose and native/systemd packaging
 
-Create system user `megad`.
+Docker/Compose is the primary production deployment. The checked-in
+`Dockerfile` MUST use reproducible, exact-pinned build inputs and a
+multi-stage build. The final image MUST contain only the static Go binary with
+the embedded frontend and its required CA bundle; Node.js, Java, shells, and
+package managers are build-time only. It MUST:
 
-Expected runtime permissions:
+- run as a non-root UID/GID;
+- use a read-only root filesystem in the Compose example;
+- drop all Linux capabilities and require no privileged mode;
+- include a healthcheck that reports database readiness without a shell or
+  extra runtime binary;
+- receive SIGTERM directly and exit after the existing bounded graceful
+  shutdown/checkpoint sequence;
+- persist only application state in its dedicated state mount;
+- leave both transfer roots unset until the operator configures them through
+  the normal settings API/UI.
 
-```text
-/var/lib/megad                       rw
-/mnt/media/downloads/mega/incomplete rw
-/mnt/media/downloads/mega/complete   rw
-```
+The Compose example MUST require operator-supplied host paths rather than
+inventing a transfer destination. It MUST mount one common transfer parent so
+the explicitly configured incomplete and complete roots can remain on one
+filesystem for atomic rename. State MUST use a separate host path or volume.
+Docker and native deployments use the same persisted settings semantics.
 
-`packaging/megad.service` must include:
+Native packaging remains supported through the single binary and
+`packaging/megad.service`. Create system user `megad` and grant the state
+directory plus the explicitly selected transfer roots only. The unit MUST
+include:
 
 ```text
 User=megad
@@ -1311,12 +1348,18 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/var/lib/megad /mnt/media/downloads/mega
+ReadWritePaths=/var/lib/megad
 ```
 
 Do not enable `PrivateNetwork` because the downloader needs outbound network access.
 
-README must include a Proxmox/LXC note: bind-mount `/mnt/media` into the LXC at the same path and ensure the `megad` user/group has write permission.
+The native install MUST document a systemd drop-in that adds the two
+operator-selected transfer roots to `ReadWritePaths` after setup. This keeps
+`ProtectSystem=strict` enabled while allowing arbitrary valid roots. It MUST
+not bake a transfer path into the unit.
+
+LXC/Proxmox documentation is optional-environment guidance only. It MUST NOT
+require a container type, fixed bind-mount location, or LXC-specific path.
 
 ## 26. UI visual specification
 
@@ -1508,9 +1551,10 @@ chart failure cannot break the download detail route
 
 Tasks:
 
+- Dockerfile and concise Compose deployment as the primary production path;
 - systemd unit and hardening;
 - single-binary release;
-- LXC README for both resource profiles;
+- optional LXC/Proxmox environment note only;
 - graceful shutdown;
 - small/large profile resource matrix;
 - log redaction tests;
@@ -1522,10 +1566,15 @@ Tasks:
 Gate:
 
 ```text
-fresh Debian LXC can run the binary as a service
+fresh Docker Compose deployment starts non-root with a passing healthcheck,
+persists state, and shuts down cleanly on SIGTERM
+fresh native Linux install can run the binary as a hardened systemd service
+fresh installs have no implicit transfer roots and reject transfers until both
+roots are configured
 Node and Java are absent at runtime
 small 2-vCPU/4-GiB profile passes the measured resource envelope
 all unit/integration/Playwright/race/security gates pass
+Docker build and Compose configuration validation pass
 live MEGA smoke passes before release
 ```
 
@@ -1546,7 +1595,10 @@ The MVP is DONE only when every item is true:
 - [ ] File integrity is verified before completion.
 - [ ] Partial data uses one `.mega.part` file per target file.
 - [ ] Completion uses same-filesystem atomic rename.
-- [ ] Default final path is `/mnt/media/downloads/mega/complete`.
+- [ ] Fresh installs have no implicit transfer paths; both roots are explicit,
+      arbitrary valid settings and transfers stay disabled until configured.
+- [ ] Existing persisted job/settings roots remain unchanged on upgrade and no
+      user files are moved automatically.
 - [ ] Queue, pause, resume, retry, cancel, delete are fully manageable from browser UI.
 - [ ] All application settings required above are manageable from browser UI.
 - [ ] Account, proxy, and public-link source secrets are encrypted at rest.
@@ -1556,6 +1608,9 @@ The MVP is DONE only when every item is true:
 - [ ] React UI is CSR and uses TanStack Router, not TanStack Start.
 - [ ] Production is a single Go binary with embedded static assets.
 - [ ] Production requires neither Node.js nor Java.
+- [ ] Docker image is minimal, reproducible, non-root, healthchecked, and
+      non-privileged; Compose persistence and SIGTERM tests pass.
+- [ ] Native/systemd installation and hardening tests pass.
 - [ ] `go test -race ./...` passes.
 - [ ] Backend integration suite passes.
 - [ ] Playwright suite passes.

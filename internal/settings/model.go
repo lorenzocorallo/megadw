@@ -8,9 +8,7 @@ import (
 )
 
 const (
-	DefaultIncompleteRoot = "/mnt/media/downloads/mega/incomplete"
-	DefaultCompleteRoot   = "/mnt/media/downloads/mega/complete"
-	DefaultSegmentSize    = int64(8 << 20)
+	DefaultSegmentSize = int64(8 << 20)
 )
 
 type Settings struct {
@@ -23,6 +21,13 @@ type Settings struct {
 type PathsSettings struct {
 	IncompleteRoot string `json:"incompleteRoot"`
 	CompleteRoot   string `json:"completeRoot"`
+}
+
+// Configured reports whether both transfer roots have been explicitly set.
+// An empty pair is the safe first-run state: the application may serve setup
+// and settings, but no transfer may be created or resumed from it.
+func (p PathsSettings) Configured() bool {
+	return p.IncompleteRoot != "" && p.CompleteRoot != ""
 }
 
 type DownloadSettings struct {
@@ -52,7 +57,9 @@ type UISettings struct {
 
 func Default() Settings {
 	return Settings{
-		Paths: PathsSettings{IncompleteRoot: DefaultIncompleteRoot, CompleteRoot: DefaultCompleteRoot},
+		// Transfer storage is intentionally unconfigured on a fresh install.
+		// State storage has its own process-level default in internal/app.
+		Paths: PathsSettings{},
 		Downloads: DownloadSettings{
 			AutoStart:                        true,
 			SegmentSizeBytes:                 DefaultSegmentSize,
@@ -75,7 +82,12 @@ func (s Settings) Validate() error {
 	var problems []string
 	checkRoot := func(name, value string) {
 		if value == "" {
-			problems = append(problems, name+" is required")
+			// Empty is the explicit first-run/unconfigured value. Handlers and
+			// the transfer manager gate all transfer work on Configured().
+			return
+		}
+		if strings.TrimSpace(value) == "" {
+			problems = append(problems, name+" must be empty or an absolute path")
 			return
 		}
 		if strings.IndexByte(value, 0) >= 0 {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/lorenzocorallo/megadw/internal/api"
 	"github.com/lorenzocorallo/megadw/internal/app"
+	"github.com/lorenzocorallo/megadw/internal/settings"
 	"github.com/lorenzocorallo/megadw/tests/integration"
 )
 
@@ -56,8 +57,13 @@ func TestSetupLoginSettingsResolveAndCreateKeepSecretsOutOfSQLite(t *testing.T) 
 	var value map[string]any
 	decodeData(t, settingsResponse, &value)
 	paths := value["paths"].(map[string]any)
-	if paths["completeRoot"] == "" {
-		t.Fatal("settings response omitted complete root")
+	if paths["completeRoot"] != "" || paths["incompleteRoot"] != "" {
+		t.Fatalf("fresh settings contain implicit transfer roots: %#v", paths)
+	}
+
+	unconfigured := doJSON(t, handler, http.MethodPost, "/api/v1/downloads", `{"url":"`+fixture.FileLink()+`"}`, cookie)
+	if unconfigured.status != http.StatusConflict || !strings.Contains(unconfigured.body, "transfer_paths_unconfigured") {
+		t.Fatalf("unconfigured create status = %d, body = %s", unconfigured.status, unconfigured.body)
 	}
 
 	resolved := doJSON(t, handler, http.MethodPost, "/api/v1/downloads/resolve", `{"url":"`+fixture.FileLink()+`"}`, cookie)
@@ -66,6 +72,19 @@ func TestSetupLoginSettingsResolveAndCreateKeepSecretsOutOfSQLite(t *testing.T) 
 	}
 	if strings.Contains(resolved.body, "FileKey") || strings.Contains(resolved.body, fixture.FileLink()) {
 		t.Fatalf("resolve response leaked source secret: %s", resolved.body)
+	}
+
+	transferRoot := t.TempDir()
+	configured := settings.Default()
+	configured.Paths.IncompleteRoot = filepath.Join(transferRoot, "partial")
+	configured.Paths.CompleteRoot = filepath.Join(transferRoot, "complete")
+	encodedSettings, err := json.Marshal(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := doJSON(t, handler, http.MethodPut, "/api/v1/settings", string(encodedSettings), cookie)
+	if updated.status != http.StatusOK {
+		t.Fatalf("configured settings status = %d, body = %s", updated.status, updated.body)
 	}
 
 	created := doJSON(t, handler, http.MethodPost, "/api/v1/downloads", `{"url":"`+fixture.FileLink()+`","destinationSubdirectory":"incoming","startImmediately":false}`, cookie)

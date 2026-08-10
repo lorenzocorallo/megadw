@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +29,8 @@ const defaultListenAddress = "127.0.0.1:8080"
 
 func main() {
 	slog.SetDefault(logging.NewTextLogger(os.Stdout))
+	healthcheck := flag.Bool("healthcheck", false, "check the local HTTP health endpoint and exit")
+	healthcheckURL := flag.String("healthcheck-url", envOrDefault("MEGAD_HEALTHCHECK_URL", "http://127.0.0.1:8080/api/v1/health"), "health endpoint URL")
 	listenAddress := flag.String("listen", envOrDefault("MEGAD_LISTEN", defaultListenAddress), "HTTP listen address")
 	stateDir := flag.String("state-dir", envOrDefault("MEGAD_STATE_DIR", app.DefaultStateDir), "application state directory")
 	databasePath := flag.String("database", os.Getenv("MEGAD_DATABASE"), "SQLite database path")
@@ -34,6 +38,13 @@ func main() {
 	megaAPIBaseURL := flag.String("mega-api-base", os.Getenv("MEGAD_MEGA_API_BASE_URL"), "MEGA API base URL (for compatibility fixtures and routed deployments)")
 	secureCookies := flag.Bool("secure-cookies", envBool("MEGAD_SECURE_COOKIES"), "mark administrator session cookies Secure (required behind an HTTPS reverse proxy)")
 	flag.Parse()
+	if *healthcheck {
+		if err := runHealthcheck(*healthcheckURL); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	application, err := app.Open(context.Background(), app.Config{
 		StateDir:           *stateDir,
@@ -132,6 +143,35 @@ func main() {
 		}
 		_ = application.Close()
 	}
+}
+
+func runHealthcheck(endpoint string) error {
+	client := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
+	defer client.CloseIdleConnections()
+	response, err := client.Get(endpoint)
+	if err != nil {
+		return fmt.Errorf("healthcheck request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthcheck returned HTTP %d", response.StatusCode)
+	}
+	var value struct {
+		Data struct {
+			Status   string `json:"status"`
+			Database string `json:"database"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(&value); err != nil {
+		return fmt.Errorf("decode healthcheck response: %w", err)
+	}
+	if value.Data.Status != "ok" || value.Data.Database != "ok" {
+		return fmt.Errorf("healthcheck is not ready: status=%q database=%q", value.Data.Status, value.Data.Database)
+	}
+	return nil
 }
 
 func envOrDefault(name, fallback string) string {

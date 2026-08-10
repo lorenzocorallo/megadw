@@ -1,0 +1,14 @@
+.git
+.github
+.docs
+dist
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+web/coverage
+internal/webui/dist/*
+!internal/webui/dist/index.html
+*.sqlite3
+*.sqlite3-*
+*.mega.part

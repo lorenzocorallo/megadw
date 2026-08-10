@@ -311,6 +311,7 @@ func TestPhaseEFailurePreservesFileCompletedByParallelSibling(t *testing.T) {
 	record := insertPhaseEJobWithFiles(t, db, secrets, fixture, roots, jobID, fixture.FileLink(), 64<<10, 2)
 	failing := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		time.Sleep(250 * time.Millisecond)
+		writer.Header().Set("Retry-After", "0")
 		writer.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer failing.Close()

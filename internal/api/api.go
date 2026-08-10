@@ -17,6 +17,7 @@ import (
 	"github.com/lorenzocorallo/megadw/internal/download"
 	"github.com/lorenzocorallo/megadw/internal/fsroot"
 	"github.com/lorenzocorallo/megadw/internal/mega"
+	"github.com/lorenzocorallo/megadw/internal/network"
 	"github.com/lorenzocorallo/megadw/internal/settings"
 	"github.com/lorenzocorallo/megadw/internal/store"
 )
@@ -36,17 +37,19 @@ type Config struct {
 	Auth          *auth.Manager
 	Mega          *mega.Client
 	Downloads     *download.Manager
+	Transports    *network.TransportPool
 	Version       string
 	SecureCookies bool
 	Now           func() time.Time
 }
 
 type Server struct {
-	config    Config
-	auth      *auth.Manager
-	settings  *settings.Service
-	mega      *mega.Client
-	downloads *download.Manager
+	config     Config
+	auth       *auth.Manager
+	settings   *settings.Service
+	mega       *mega.Client
+	downloads  *download.Manager
+	transports *network.TransportPool
 }
 
 func New(config Config) http.Handler {
@@ -66,7 +69,10 @@ func NewServer(config Config) *Server {
 	if config.Version == "" {
 		config.Version = defaultAPIVersion
 	}
-	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads}
+	if config.Transports == nil {
+		config.Transports = network.NewTransportPool(network.TransportConfig{ConnectTimeout: 15 * time.Second, ResponseHeaderTimeout: 30 * time.Second, MaxConnectionsPerHost: 8})
+	}
+	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads, transports: config.Transports}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -91,9 +97,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/downloads/{id}", s.withAuth(s.handleGetDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/pause", s.withAuth(s.handlePauseDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/resume", s.withAuth(s.handleResumeDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/retry", s.withAuth(s.handleRetryDownload))
 	mux.HandleFunc("POST /api/v1/downloads/{id}/cancel", s.withAuth(s.handleCancelDownload))
 	mux.HandleFunc("POST /api/v1/queue/pause", s.withAuth(s.handlePauseQueue))
 	mux.HandleFunc("POST /api/v1/queue/resume", s.withAuth(s.handleResumeQueue))
+	mux.HandleFunc("GET /api/v1/accounts", s.withAuth(s.handleListAccounts))
+	mux.HandleFunc("POST /api/v1/accounts", s.withAuth(s.handleCreateAccount))
+	mux.HandleFunc("POST /api/v1/accounts/{id}/test", s.withAuth(s.handleTestAccount))
+	mux.HandleFunc("PUT /api/v1/accounts/{id}", s.withAuth(s.handleUpdateAccount))
+	mux.HandleFunc("DELETE /api/v1/accounts/{id}", s.withAuth(s.handleDeleteAccount))
+	mux.HandleFunc("GET /api/v1/proxies", s.withAuth(s.handleListProxies))
+	mux.HandleFunc("POST /api/v1/proxies", s.withAuth(s.handleCreateProxy))
+	mux.HandleFunc("POST /api/v1/proxies/{id}/test", s.withAuth(s.handleTestProxy))
+	mux.HandleFunc("PUT /api/v1/proxies/{id}", s.withAuth(s.handleUpdateProxy))
+	mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.withAuth(s.handleDeleteProxy))
 
 	return sameOrigin(mux)
 }
@@ -284,13 +301,14 @@ func (s *Server) resolve(ctx context.Context, input resolveRequest) (mega.Public
 	if err != nil {
 		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, err
 	}
-	if input.AccountID != "" {
-		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, fmt.Errorf("account selection is not available yet")
-	}
 	if s.mega == nil {
 		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, fmt.Errorf("MEGA resolver is unavailable")
 	}
-	job, err := s.mega.ResolveLink(ctx, input.URL, input.AccountID)
+	client, err := s.clientForAccount(ctx, input.AccountID)
+	if err != nil {
+		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, err
+	}
+	job, err := client.ResolveLink(ctx, input.URL, input.AccountID)
 	if err != nil {
 		return mega.PublicLink{}, mega.ResolvedJob{}, resolvedResponse{}, err
 	}
@@ -318,6 +336,336 @@ func (s *Server) handleResolve(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, http.StatusOK, response)
 }
 
+func (s *Server) clientForAccount(ctx context.Context, accountID string) (*mega.Client, error) {
+	if accountID == "" {
+		return s.mega, nil
+	}
+	if s.config.DB == nil || s.config.Secrets == nil {
+		return nil, fmt.Errorf("account storage is unavailable")
+	}
+	account, err := s.config.DB.GetMegaAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	credentialCipher, sessionCipher, err := s.config.DB.MegaAccountSecrets(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessionCipher) > 0 {
+		session, err := s.config.Secrets.Decrypt(sessionCipher)
+		if err == nil && len(session) > 0 {
+			return s.mega.WithSession(string(session)), nil
+		}
+	}
+	credential, err := s.config.Secrets.Decrypt(credentialCipher)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt account credential: %w", err)
+	}
+	session, err := s.mega.LoginAccount(account.Email, string(credential))
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "multi-factor") {
+			return nil, fmt.Errorf("MFA-enabled accounts are not supported in this version")
+		}
+		return nil, fmt.Errorf("MEGA account login failed")
+	}
+	sessionCipher, err = s.config.Secrets.Encrypt([]byte(session))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.config.DB.UpdateMegaAccount(ctx, accountID, account.Label, account.Email, nil, sessionCipher, "active", account.DefaultForDownloads, time.Now()); err != nil {
+		return nil, err
+	}
+	return s.mega.WithSession(session), nil
+}
+
+type accountRequest struct {
+	Label               string `json:"label"`
+	Email               string `json:"email"`
+	Password            string `json:"password"`
+	DefaultForDownloads *bool  `json:"defaultForDownloads"`
+}
+
+func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	accounts, err := s.config.DB.ListMegaAccounts(r.Context())
+	if err != nil {
+		writeError(w, 500, "database_error", "could not list accounts", nil)
+		return
+	}
+	writeJSON(w, 200, accounts)
+}
+func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	var in accountRequest
+	if !decodeJSON(w, r, &in, maxJSONBody) {
+		return
+	}
+	if strings.TrimSpace(in.Label) == "" || strings.TrimSpace(in.Email) == "" || in.Password == "" {
+		writeError(w, 400, "account_invalid", "label, email, and password are required", nil)
+		return
+	}
+	session, err := s.mega.LoginAccount(in.Email, in.Password)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "multi-factor") {
+			writeError(w, 400, "account_mfa_unsupported", "MFA-enabled accounts are not supported in this version", nil)
+		} else {
+			writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+		}
+		return
+	}
+	credential, err := s.config.Secrets.Encrypt([]byte(in.Password))
+	if err != nil {
+		writeError(w, 500, "encryption_error", "could not protect account credential", nil)
+		return
+	}
+	sessionCipher, err := s.config.Secrets.Encrypt([]byte(session))
+	if err != nil {
+		writeError(w, 500, "encryption_error", "could not protect account session", nil)
+		return
+	}
+	def := in.DefaultForDownloads != nil && *in.DefaultForDownloads
+	record, err := s.config.DB.InsertMegaAccount(r.Context(), store.MegaAccountInput{Label: in.Label, Email: in.Email, CredentialCiphertext: credential, SessionCiphertext: sessionCipher, Status: "active", DefaultForDownloads: def}, time.Now())
+	if err != nil {
+		writeError(w, 500, "database_error", "could not save account", nil)
+		return
+	}
+	writeJSON(w, http.StatusCreated, record)
+}
+func (s *Server) handleTestAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	id := r.PathValue("id")
+	account, err := s.config.DB.GetMegaAccount(r.Context(), id)
+	if err != nil {
+		writeError(w, 404, "account_not_found", "account was not found", nil)
+		return
+	}
+	credential, _, err := s.config.DB.MegaAccountSecrets(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "database_error", "could not read account", nil)
+		return
+	}
+	password, err := s.config.Secrets.Decrypt(credential)
+	if err != nil {
+		writeError(w, 500, "encryption_error", "could not decrypt account credential", nil)
+		return
+	}
+	if _, err = s.mega.LoginAccount(account.Email, string(password)); err != nil {
+		_ = s.config.DB.MarkMegaAccountChecked(r.Context(), id, "error", time.Now())
+		writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+		return
+	}
+	_ = s.config.DB.MarkMegaAccountChecked(r.Context(), id, "active", time.Now())
+	writeJSON(w, 200, map[string]string{"status": "active"})
+}
+func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	id := r.PathValue("id")
+	account, err := s.config.DB.GetMegaAccount(r.Context(), id)
+	if err != nil {
+		writeError(w, 404, "account_not_found", "account was not found", nil)
+		return
+	}
+	var in accountRequest
+	if !decodeJSON(w, r, &in, maxJSONBody) {
+		return
+	}
+	if in.Label == "" {
+		in.Label = account.Label
+	}
+	if in.Email == "" {
+		in.Email = account.Email
+	}
+	def := account.DefaultForDownloads
+	if in.DefaultForDownloads != nil {
+		def = *in.DefaultForDownloads
+	}
+	var credential, session []byte
+	if in.Password != "" {
+		sessionID, loginErr := s.mega.LoginAccount(in.Email, in.Password)
+		if loginErr != nil {
+			writeError(w, 400, "account_login_failed", "MEGA account login failed", nil)
+			return
+		}
+		credential, err = s.config.Secrets.Encrypt([]byte(in.Password))
+		if err != nil {
+			writeError(w, 500, "encryption_error", "could not protect account credential", nil)
+			return
+		}
+		session, err = s.config.Secrets.Encrypt([]byte(sessionID))
+		if err != nil {
+			writeError(w, 500, "encryption_error", "could not protect account session", nil)
+			return
+		}
+	}
+	if err := s.config.DB.UpdateMegaAccount(r.Context(), id, in.Label, in.Email, credential, session, account.Status, def, time.Now()); err != nil {
+		writeError(w, 400, "account_update_failed", err.Error(), nil)
+		return
+	}
+	record, _ := s.config.DB.GetMegaAccount(r.Context(), id)
+	writeJSON(w, 200, record)
+}
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	if err := s.config.DB.DeleteMegaAccount(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, 404, "account_not_found", "account was not found", nil)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"deleted": true})
+}
+
+type proxyRequest struct {
+	Name                string `json:"name"`
+	Type                string `json:"type"`
+	Host                string `json:"host"`
+	Port                int    `json:"port"`
+	Username            string `json:"username"`
+	Password            string `json:"password"`
+	TimeoutSeconds      int    `json:"timeoutSeconds"`
+	Enabled             *bool  `json:"enabled"`
+	DefaultForDownloads *bool  `json:"defaultForDownloads"`
+	URL                 string `json:"url"`
+}
+
+func (s *Server) proxyInput(r proxyRequest, password []byte) (store.ProxyProfileInput, error) {
+	enabled := true
+	if r.Enabled != nil {
+		enabled = *r.Enabled
+	}
+	def := false
+	if r.DefaultForDownloads != nil {
+		def = *r.DefaultForDownloads
+	}
+	if r.TimeoutSeconds == 0 {
+		r.TimeoutSeconds = 15
+	}
+	profile := network.ProxyProfile{Type: network.ProxyType(r.Type), Host: r.Host, Port: r.Port, Timeout: time.Duration(r.TimeoutSeconds) * time.Second}
+	if err := profile.Validate(); err != nil {
+		return store.ProxyProfileInput{}, err
+	}
+	return store.ProxyProfileInput{Name: r.Name, Type: r.Type, Host: r.Host, Port: r.Port, Username: r.Username, PasswordCiphertext: password, TimeoutSeconds: r.TimeoutSeconds, Enabled: enabled, DefaultForDownloads: def}, nil
+}
+func (s *Server) handleListProxies(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	items, err := s.config.DB.ListProxyProfiles(r.Context())
+	if err != nil {
+		writeError(w, 500, "database_error", "could not list proxies", nil)
+		return
+	}
+	writeJSON(w, 200, items)
+}
+func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	var in proxyRequest
+	if !decodeJSON(w, r, &in, maxJSONBody) {
+		return
+	}
+	password, err := s.config.Secrets.Encrypt([]byte(in.Password))
+	if err != nil {
+		writeError(w, 500, "encryption_error", "could not protect proxy password", nil)
+		return
+	}
+	value, err := s.proxyInput(in, password)
+	if err != nil {
+		writeError(w, 400, "proxy_invalid", err.Error(), nil)
+		return
+	}
+	record, err := s.config.DB.InsertProxyProfile(r.Context(), value, time.Now())
+	if err != nil {
+		writeError(w, 400, "proxy_create_failed", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusCreated, record)
+}
+func (s *Server) proxyClient(r *http.Request, id string) (*http.Client, error) {
+	profile, err := s.config.DB.GetProxyProfile(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := s.config.DB.ProxySecret(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	password, err := s.config.Secrets.Decrypt(ciphertext)
+	if err != nil && len(ciphertext) > 0 {
+		return nil, err
+	}
+	return s.transports.Client(network.ProxyProfile{ID: profile.ID, Name: profile.Name, Type: network.ProxyType(profile.Type), Host: profile.Host, Port: profile.Port, Username: profile.Username, Password: string(password), Timeout: time.Duration(profile.TimeoutSeconds) * time.Second, Enabled: profile.Enabled})
+}
+func (s *Server) handleTestProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	client, err := s.proxyClient(r, r.PathValue("id"))
+	if err != nil {
+		writeError(w, 400, "proxy_invalid", err.Error(), nil)
+		return
+	}
+	var input struct {
+		URL string `json:"url"`
+	}
+	_ = decodeJSON(rwDiscard{}, r, &input, maxJSONBody)
+	target := input.URL
+	if target == "" {
+		target = "https://g.api.mega.co.nz/"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err == nil {
+		resp, requestErr := client.Do(req)
+		if requestErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				writeError(w, 400, "proxy_test_failed", fmt.Sprintf("proxy request returned HTTP %d", resp.StatusCode), nil)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"ok": true, "status": resp.StatusCode})
+			return
+		}
+		err = requestErr
+	}
+	writeError(w, 400, "proxy_test_failed", "proxy request failed", nil)
+}
+func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	id := r.PathValue("id")
+	if _, err := s.config.DB.GetProxyProfile(r.Context(), id); err != nil {
+		writeError(w, 404, "proxy_not_found", "proxy was not found", nil)
+		return
+	}
+	var in proxyRequest
+	if !decodeJSON(w, r, &in, maxJSONBody) {
+		return
+	}
+	var password []byte
+	if in.Password != "" {
+		password, _ = s.config.Secrets.Encrypt([]byte(in.Password))
+	}
+	value, err := s.proxyInput(in, password)
+	if err != nil {
+		writeError(w, 400, "proxy_invalid", err.Error(), nil)
+		return
+	}
+	if err := s.config.DB.UpdateProxyProfile(r.Context(), id, value, time.Now()); err != nil {
+		writeError(w, 400, "proxy_update_failed", err.Error(), nil)
+		return
+	}
+	if s.transports != nil {
+		s.transports.Remove(id)
+	}
+	record, _ := s.config.DB.GetProxyProfile(r.Context(), id)
+	writeJSON(w, 200, record)
+}
+func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
+	id := r.PathValue("id")
+	if err := s.config.DB.DeleteProxyProfile(r.Context(), id); err != nil {
+		writeError(w, 404, "proxy_not_found", "proxy was not found", nil)
+		return
+	}
+	if s.transports != nil {
+		s.transports.Remove(id)
+	}
+	writeJSON(w, 200, map[string]bool{"deleted": true})
+}
+
+// rwDiscard is only used to parse the optional proxy test body while keeping
+// the normal error response path in the shared helper. A malformed body is
+// treated as an absent optional URL.
+type rwDiscard struct{}
+
+func (rwDiscard) Header() http.Header       { return http.Header{} }
+func (rwDiscard) Write([]byte) (int, error) { return 0, nil }
+func (rwDiscard) WriteHeader(int)           {}
+
 type createDownloadRequest struct {
 	URL                     string `json:"url"`
 	AccountID               string `json:"accountId"`
@@ -331,16 +679,25 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 	if !decodeJSON(writer, request, &input, maxResolveBody) {
 		return
 	}
-	if input.AccountID != "" || input.ProxyID != "" {
-		writeError(writer, http.StatusBadRequest, "selection_unavailable", "account and proxy selection are not available in this phase", nil)
-		return
+	if input.AccountID != "" {
+		if _, err := s.config.DB.GetMegaAccount(request.Context(), input.AccountID); err != nil {
+			writeError(writer, http.StatusBadRequest, "account_invalid", "selected account was not found", nil)
+			return
+		}
+	}
+	if input.ProxyID != "" {
+		profile, err := s.config.DB.GetProxyProfile(request.Context(), input.ProxyID)
+		if err != nil || !profile.Enabled {
+			writeError(writer, http.StatusBadRequest, "proxy_invalid", "selected proxy profile is unavailable", nil)
+			return
+		}
 	}
 	destination, err := fsroot.SanitizeDestinationSubdirectory(input.DestinationSubdirectory)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "destination_invalid", err.Error(), nil)
 		return
 	}
-	link, job, _, err := s.resolve(request.Context(), resolveRequest{URL: input.URL})
+	link, job, _, err := s.resolve(request.Context(), resolveRequest{URL: input.URL, AccountID: input.AccountID})
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, errorCode(err), err.Error(), nil)
 		return
@@ -440,6 +797,8 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		DisplayName:         job.DisplayName,
 		TotalBytes:          job.TotalBytes,
 		DestinationSubdir:   destination,
+		AccountID:           input.AccountID,
+		ProxyID:             input.ProxyID,
 		CompleteRoot:        currentSettings.Paths.CompleteRoot,
 		IncompleteRoot:      currentSettings.Paths.IncompleteRoot,
 		State:               state,
@@ -512,6 +871,18 @@ func (s *Server) handleResumeDownload(writer http.ResponseWriter, request *http.
 	}
 	if err := s.downloads.ResumeJob(request.Context(), request.PathValue("id")); err != nil {
 		writeError(writer, http.StatusBadRequest, "download_resume_failed", err.Error(), nil)
+		return
+	}
+	s.writeDownloadActionResult(writer, request)
+}
+
+func (s *Server) handleRetryDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	if err := s.downloads.ResumeJob(request.Context(), request.PathValue("id")); err != nil {
+		writeError(writer, http.StatusBadRequest, "download_retry_failed", err.Error(), nil)
 		return
 	}
 	s.writeDownloadActionResult(writer, request)

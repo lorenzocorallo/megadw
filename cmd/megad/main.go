@@ -37,7 +37,7 @@ func main() {
 		slog.Error("load embedded web UI", "error", err)
 		os.Exit(1)
 	}
-	apiHandler := api.New(api.Config{DB: application.DB, Secrets: application.Secrets, Settings: application.Settings, Auth: application.Auth, Mega: application.Mega, Downloads: application.Downloads})
+	apiHandler := api.New(api.Config{DB: application.DB, Secrets: application.Secrets, Settings: application.Settings, Auth: application.Auth, Mega: application.Mega, Downloads: application.Downloads, Transports: application.Transports})
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/", apiHandler)
 	mux.Handle("/", staticHandler)

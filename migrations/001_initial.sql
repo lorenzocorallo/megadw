@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS download_jobs (
 CREATE INDEX IF NOT EXISTS download_jobs_state_idx ON download_jobs(state);
 CREATE INDEX IF NOT EXISTS download_jobs_created_at_idx ON download_jobs(created_at);
 
+-- Phase F durable quota scheduling fields. The embedded migration applies
+-- these as migration 2 for databases created by earlier phases.
+ALTER TABLE download_jobs ADD COLUMN quota_next_retry_at TEXT;
+ALTER TABLE download_jobs ADD COLUMN quota_retry_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE download_jobs ADD COLUMN last_error_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE download_jobs ADD COLUMN last_error_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE proxy_profiles ADD COLUMN default_for_downloads INTEGER NOT NULL DEFAULT 0 CHECK(default_for_downloads IN (0, 1));
+
 CREATE TABLE IF NOT EXISTS download_files (
     id TEXT PRIMARY KEY,
     job_id TEXT NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,

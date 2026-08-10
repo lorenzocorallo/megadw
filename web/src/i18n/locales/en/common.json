@@ -57,11 +57,34 @@
     },
     "accounts": {
       "title": "Accounts",
-      "description": "MEGA account management will be available in a later phase."
+      "description": "Store standard MEGA account credentials securely for explicit job selection.",
+      "label": "Label",
+      "email": "Email",
+      "password": "Password",
+      "status": "Status",
+      "actions": "Actions",
+      "add": "Add account",
+      "test": "Test",
+      "remove": "Remove",
+      "saved": "Account saved.",
+      "default": "Default for downloads"
     },
     "proxies": {
       "title": "Proxies",
-      "description": "Explicit proxy profiles will be available in a later phase."
+      "description": "Route selected jobs through explicit HTTP, HTTPS CONNECT, or SOCKS5 profiles.",
+      "name": "Name",
+      "type": "Type",
+      "host": "Host",
+      "port": "Port",
+      "username": "Username",
+      "password": "Password",
+      "endpoint": "Endpoint",
+      "actions": "Actions",
+      "add": "Add proxy",
+      "test": "Test",
+      "remove": "Remove",
+      "saved": "Proxy saved.",
+      "default": "Default for downloads"
     },
     "appearance": {
       "title": "Appearance",
@@ -100,6 +123,8 @@
     "resolving": "Resolving…",
     "adding": "Adding…",
     "addDownload": "Add download",
+    "resumeNow": "Resume now",
+    "pause": "Pause",
     "added": "Download added to the queue.",
     "metadata": "{{kind}} · {{files}} file(s) · {{size}}",
     "kind": {

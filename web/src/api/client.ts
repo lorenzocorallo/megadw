@@ -58,12 +58,36 @@ export type Download = {
   state: string;
   createdAt: string;
   updatedAt: string;
+  quotaNextRetryAt?: string;
+  quotaRetryIndex?: number;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
   files: Array<{
     id: string;
     finalRelativePath: string;
     sizeBytes: number;
     state: string;
   }>;
+};
+
+export type Account = {
+  id: string;
+  label: string;
+  email: string;
+  status: string;
+  defaultForDownloads: boolean;
+  lastCheckedAt?: string;
+};
+export type ProxyProfile = {
+  id: string;
+  name: string;
+  type: string;
+  host: string;
+  port: number;
+  username?: string;
+  timeoutSeconds: number;
+  enabled: boolean;
+  defaultForDownloads: boolean;
 };
 
 type Envelope<T> = { data: T };
@@ -131,15 +155,17 @@ export function putSettings(value: Settings) {
   });
 }
 
-export function resolveDownload(url: string) {
+export function resolveDownload(url: string, accountId = "") {
   return apiRequest<ResolvedDownload>("/api/v1/downloads/resolve", {
     method: "POST",
-    body: JSON.stringify({ url, accountId: "" }),
+    body: JSON.stringify({ url, accountId }),
   });
 }
 
 export function createDownload(input: {
   url: string;
+  accountId?: string;
+  proxyId?: string;
   destinationSubdirectory: string;
   startImmediately: boolean;
 }) {
@@ -151,4 +177,56 @@ export function createDownload(input: {
 
 export function listDownloads() {
   return apiRequest<Download[]>("/api/v1/downloads");
+}
+export function resumeDownload(id: string) {
+  return apiRequest<Download>(`/api/v1/downloads/${id}/resume`, { method: "POST", body: "{}" });
+}
+export function pauseDownload(id: string) {
+  return apiRequest<Download>(`/api/v1/downloads/${id}/pause`, { method: "POST", body: "{}" });
+}
+
+export function listAccounts() {
+  return apiRequest<Account[]>("/api/v1/accounts");
+}
+export function createAccount(input: {
+  label: string;
+  email: string;
+  password: string;
+  defaultForDownloads: boolean;
+}) {
+  return apiRequest<Account>("/api/v1/accounts", { method: "POST", body: JSON.stringify(input) });
+}
+export function testAccount(id: string) {
+  return apiRequest<{ status: string }>(`/api/v1/accounts/${id}/test`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+export function deleteAccount(id: string) {
+  return apiRequest<{ deleted: boolean }>(`/api/v1/accounts/${id}`, { method: "DELETE" });
+}
+export function listProxies() {
+  return apiRequest<ProxyProfile[]>("/api/v1/proxies");
+}
+export function createProxy(input: {
+  name: string;
+  type: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  timeoutSeconds: number;
+  enabled: boolean;
+  defaultForDownloads: boolean;
+}) {
+  return apiRequest<ProxyProfile>("/api/v1/proxies", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+export function testProxy(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/v1/proxies/${id}/test`, { method: "POST", body: "{}" });
+}
+export function deleteProxy(id: string) {
+  return apiRequest<{ deleted: boolean }>(`/api/v1/proxies/${id}`, { method: "DELETE" });
 }

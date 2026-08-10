@@ -31,12 +31,13 @@ type Config struct {
 }
 
 type App struct {
-	DB        *store.DB
-	Secrets   *store.SecretStore
-	Settings  *settings.Service
-	Auth      *auth.Manager
-	Mega      *mega.Client
-	Downloads *download.Manager
+	DB         *store.DB
+	Secrets    *store.SecretStore
+	Settings   *settings.Service
+	Auth       *auth.Manager
+	Mega       *mega.Client
+	Downloads  *download.Manager
+	Transports *network.TransportPool
 }
 
 func Open(ctx context.Context, config Config) (*App, error) {
@@ -66,12 +67,12 @@ func Open(ctx context.Context, config Config) (*App, error) {
 		return closeWithError(fmt.Errorf("initialize settings: %w", err))
 	}
 	manager := auth.NewManager(database)
+	current, settingsErr := settingsService.Get(ctx)
+	if settingsErr != nil {
+		return closeWithError(fmt.Errorf("read network settings: %w", settingsErr))
+	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		current, settingsErr := settingsService.Get(ctx)
-		if settingsErr != nil {
-			return closeWithError(fmt.Errorf("read network settings: %w", settingsErr))
-		}
 		httpClient = network.NewHTTPClient(network.TransportConfig{
 			ConnectTimeout:        time.Duration(current.Network.ConnectTimeoutSeconds) * time.Second,
 			ResponseHeaderTimeout: time.Duration(current.Network.ResponseHeaderTimeoutSeconds) * time.Second,
@@ -79,7 +80,8 @@ func Open(ctx context.Context, config Config) (*App, error) {
 		})
 	}
 	client := mega.NewClient(httpClient, config.MegaAPIBaseURL)
-	downloadManager, err := download.NewManager(download.Config{DB: database, Secrets: secrets, Mega: client, Settings: settingsService})
+	transports := network.NewTransportPool(network.TransportConfig{ConnectTimeout: time.Duration(current.Network.ConnectTimeoutSeconds) * time.Second, ResponseHeaderTimeout: time.Duration(current.Network.ResponseHeaderTimeoutSeconds) * time.Second, MaxConnectionsPerHost: current.Downloads.MaxGlobalWorkers})
+	downloadManager, err := download.NewManager(download.Config{DB: database, Secrets: secrets, Mega: client, Settings: settingsService, TransportPool: transports, NormalRetryLimit: current.Downloads.NormalRetryLimit})
 	if err != nil {
 		return closeWithError(fmt.Errorf("initialize download manager: %w", err))
 	}
@@ -87,7 +89,7 @@ func Open(ctx context.Context, config Config) (*App, error) {
 		_ = downloadManager.Close()
 		return closeWithError(fmt.Errorf("start download manager: %w", err))
 	}
-	return &App{DB: database, Secrets: secrets, Settings: settingsService, Auth: manager, Mega: client, Downloads: downloadManager}, nil
+	return &App{DB: database, Secrets: secrets, Settings: settingsService, Auth: manager, Mega: client, Downloads: downloadManager, Transports: transports}, nil
 }
 
 func (a *App) Close() error {
@@ -99,6 +101,9 @@ func (a *App) Close() error {
 	}
 	if a.Mega != nil {
 		a.Mega.CloseIdleConnections()
+	}
+	if a.Transports != nil {
+		a.Transports.Close()
 	}
 	return a.DB.Close()
 }

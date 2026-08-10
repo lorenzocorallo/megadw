@@ -14,6 +14,7 @@ import (
 
 	"github.com/lorenzocorallo/megadw/internal/fsroot"
 	"github.com/lorenzocorallo/megadw/internal/mega"
+	"github.com/lorenzocorallo/megadw/internal/network"
 	"github.com/lorenzocorallo/megadw/internal/settings"
 	"github.com/lorenzocorallo/megadw/internal/store"
 )
@@ -51,6 +52,8 @@ type Config struct {
 	// retained alongside the shorter field for embedders.
 	PerJobDefaultLimitBytesPerSecond int64
 	ReadIdleTimeout                  time.Duration
+	NormalRetryLimit                 int
+	TransportPool                    *network.TransportPool
 
 	Now func() time.Time
 }
@@ -128,6 +131,8 @@ type Manager struct {
 	globalLimiter    *BandwidthLimiter
 	perJobLimit      int64
 	readIdleTimeout  time.Duration
+	normalRetryLimit int
+	transportPool    *network.TransportPool
 
 	mu             sync.Mutex
 	started        bool
@@ -153,6 +158,8 @@ type Manager struct {
 	speedMu    sync.Mutex
 	speeds     map[string]*SpeedMeter
 	speedOrder []string
+
+	quotaTimers map[string]*time.Timer
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -198,6 +205,9 @@ func NewManager(config Config) (*Manager, error) {
 		if config.ReadIdleTimeout == 0 {
 			config.ReadIdleTimeout = time.Duration(value.Network.ReadIdleTimeoutSeconds) * time.Second
 		}
+		if config.NormalRetryLimit == 0 {
+			config.NormalRetryLimit = value.Downloads.NormalRetryLimit
+		}
 	}
 	if config.PerJobDefaultLimitBytesPerSec == 0 {
 		config.PerJobDefaultLimitBytesPerSec = config.PerJobDefaultLimitBytesPerSecond
@@ -238,6 +248,12 @@ func NewManager(config Config) (*Manager, error) {
 	if config.ReadIdleTimeout == 0 {
 		config.ReadIdleTimeout = defaultReadIdleTimeout
 	}
+	if config.NormalRetryLimit == 0 {
+		config.NormalRetryLimit = 5
+	}
+	if config.NormalRetryLimit < 0 || config.NormalRetryLimit > 20 {
+		return nil, fmt.Errorf("normal retry limit is outside the safe range")
+	}
 	if config.ReadIdleTimeout < time.Second || config.ReadIdleTimeout > time.Hour {
 		return nil, fmt.Errorf("read idle timeout is outside the safe range")
 	}
@@ -264,6 +280,8 @@ func NewManager(config Config) (*Manager, error) {
 		globalLimiter:      NewBandwidthLimiter(config.GlobalSpeedLimitBytesPerSecond),
 		perJobLimit:        config.PerJobDefaultLimitBytesPerSec,
 		readIdleTimeout:    config.ReadIdleTimeout,
+		normalRetryLimit:   config.NormalRetryLimit,
+		transportPool:      config.TransportPool,
 		pending:            make(map[string]struct{}),
 		active:             make(map[string]struct{}),
 		controls:           make(map[string]*jobControl),
@@ -271,6 +289,7 @@ func NewManager(config Config) (*Manager, error) {
 		pendingSeq:         make(map[string]uint64),
 		queuePausedIDs:     make(map[string]struct{}),
 		speeds:             make(map[string]*SpeedMeter),
+		quotaTimers:        make(map[string]*time.Timer),
 	}
 	heap.Init(&manager.queue)
 	return manager, nil
@@ -332,9 +351,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	for _, job := range jobs {
 		if job.State == string(JobQueued) || (job.State == string(JobPausedRecovery) && autoStart) {
+			if job.State == string(JobPausedRecovery) {
+				_ = m.db.SetDownloadJobState(ctx, job.ID, string(JobQueued), m.now())
+			}
 			if err := m.StartJob(job.ID); err != nil {
 				return err
 			}
+		}
+		if job.State == string(JobWaitingQuota) {
+			m.schedulePersistedQuotaRetry(job)
 		}
 	}
 	return nil
@@ -587,6 +612,12 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	cancel()
+	m.mu.Lock()
+	for id, timer := range m.quotaTimers {
+		timer.Stop()
+		delete(m.quotaTimers, id)
+	}
+	m.mu.Unlock()
 	<-done
 	return nil
 }
@@ -597,6 +628,12 @@ func (m *Manager) PauseJob(ctx context.Context, jobID string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	m.mu.Lock()
+	if timer := m.quotaTimers[jobID]; timer != nil {
+		timer.Stop()
+		delete(m.quotaTimers, jobID)
+	}
+	m.mu.Unlock()
 	m.mu.Lock()
 	delete(m.queuePausedIDs, jobID)
 	if control := m.controls[jobID]; control != nil {
@@ -654,10 +691,16 @@ func (m *Manager) ResumeJob(ctx context.Context, jobID string) error {
 	if IsTerminalJobState(state) && state != JobFailed {
 		return fmt.Errorf("cannot resume terminal job %q", jobID)
 	}
+	m.mu.Lock()
+	if timer := m.quotaTimers[jobID]; timer != nil {
+		timer.Stop()
+		delete(m.quotaTimers, jobID)
+	}
+	m.mu.Unlock()
 	if err := TransitionJobState(state, JobQueued); err != nil {
 		return err
 	}
-	if err := m.db.SetDownloadJobState(ctx, jobID, string(JobQueued), m.now()); err != nil {
+	if err := m.db.ClearDownloadQuotaState(ctx, jobID, string(JobQueued), m.now()); err != nil {
 		return err
 	}
 	return m.StartJob(jobID)
@@ -668,12 +711,93 @@ func (m *Manager) Resume(ctx context.Context, jobID string) error {
 	return m.ResumeJob(ctx, jobID)
 }
 
+func quotaDelay(index int) time.Duration {
+	switch index {
+	case 1:
+		return time.Minute
+	case 2:
+		return 2 * time.Minute
+	case 3:
+		return 5 * time.Minute
+	default:
+		return 15 * time.Minute
+	}
+}
+
+func (m *Manager) schedulePersistedQuotaRetry(job store.DownloadJobRecord) {
+	delay := time.Minute
+	if job.QuotaNextRetryAt != nil {
+		delay = time.Until(*job.QuotaNextRetryAt)
+		if delay < 0 {
+			delay = 0
+		}
+	}
+	m.scheduleQuotaRetry(job.ID, delay)
+}
+
+func (m *Manager) scheduleQuotaRetry(jobID string, delay time.Duration) {
+	if delay < 0 {
+		delay = 0
+	}
+	m.mu.Lock()
+	if old := m.quotaTimers[jobID]; old != nil {
+		old.Stop()
+	}
+	timer := time.AfterFunc(delay, func() {
+		m.mu.Lock()
+		delete(m.quotaTimers, jobID)
+		closed := m.closed || m.ctx == nil || m.ctx.Err() != nil
+		m.mu.Unlock()
+		if closed {
+			return
+		}
+		_ = m.ResumeJob(context.Background(), jobID)
+	})
+	m.quotaTimers[jobID] = timer
+	m.mu.Unlock()
+}
+
+func (m *Manager) enterWaitingQuota(job *store.DownloadJobRecord, file *store.DownloadFileRecord, quota *QuotaError) error {
+	index := job.QuotaRetryIndex + 1
+	delay := quotaDelay(index)
+	if quota != nil && quota.RetryAfter > 0 {
+		delay = quota.RetryAfter
+	}
+	next := m.now().Add(delay)
+	message := ErrQuota.Error()
+	if quota != nil && quota.Cause != nil {
+		message = quota.Error()
+	}
+	if err := m.db.SetDownloadQuotaState(context.Background(), job.ID, string(JobWaitingQuota), "quota_exhausted", message, &next, index, m.now()); err != nil {
+		return err
+	}
+	current, err := m.db.GetDownloadJob(context.Background(), job.ID)
+	if err == nil {
+		*job = current
+	}
+	for _, candidate := range job.Files {
+		if FileState(candidate.State) == FileCompleted {
+			continue
+		}
+		_ = m.db.UpdateDownloadFileState(context.Background(), store.DownloadFileStateUpdate{FileID: candidate.ID, State: string(FileWaiting), LastErrorCode: "quota_exhausted", LastErrorMessage: message, UpdatedAt: m.now()})
+	}
+	_ = m.db.AddDownloadEvent(context.Background(), job.ID, fileID(file), "warning", "MEGA quota exhausted; download is waiting", m.now())
+	m.scheduleQuotaRetry(job.ID, delay)
+	return nil
+}
+
 // CancelJob stops a job, persists cancelled states, and optionally removes
 // only its job-scoped partial directory.
 func (m *Manager) CancelJob(ctx context.Context, jobID string, deletePartialFiles bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	m.mu.Lock()
+	if timer := m.quotaTimers[jobID]; timer != nil {
+		timer.Stop()
+		delete(m.quotaTimers, jobID)
+	}
+	m.mu.Unlock()
 	m.mu.Lock()
 	if control := m.controls[jobID]; control != nil {
 		control.cancelRequested = true
@@ -964,6 +1088,13 @@ func (m *Manager) runJob(ctx context.Context, jobID string) error {
 	failure := failedFile
 	errorMu.Unlock()
 	if transferErr != nil {
+		if IsQuotaError(transferErr) {
+			var quota *QuotaError
+			if !errors.As(transferErr, &quota) {
+				quota = &QuotaError{Cause: transferErr}
+			}
+			return m.enterWaitingQuota(&job, &failure, quota)
+		}
 		if ctx.Err() != nil || errors.Is(transferErr, context.Canceled) || errors.Is(transferErr, context.DeadlineExceeded) {
 			m.pauseJob(context.Background(), job)
 			if ctx.Err() != nil {
@@ -1108,7 +1239,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 					results <- segmentResult{err: acquireErr}
 					return
 				}
-				written, downloadErr := m.worker.DownloadRangeWithOptions(transferCtx, partial, key, payloadURL, segment, file.SizeBytes, TransferOptions{Limiter: limiter, GlobalLimiter: m.globalLimiter, Meter: meter, ReadIdleTimeout: m.readIdleTimeout})
+				written, downloadErr := m.downloadSegmentWithRetry(transferCtx, job, *file, partial, key, payloadURL, segment, limiter, meter)
 				releaseSlot(m.workerSlots)
 				results <- segmentResult{segment: segment, written: written, err: downloadErr}
 				if downloadErr != nil {
@@ -1224,6 +1355,147 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	file.State = string(FileCompleted)
 	file.FinalRelativePath = finalRelativePath
 	return nil
+}
+
+func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.DownloadJobRecord, file store.DownloadFileRecord, writer interface {
+	WriteAt([]byte, int64) (int, error)
+}, key mega.FileKey, payloadURL string, segment Segment, limiter *BandwidthLimiter, meter *SpeedMeter) (int64, error) {
+	worker, client, err := m.workerForJob(job)
+	if err != nil {
+		return 0, err
+	}
+	refreshes := 0
+	for retry := 0; ; retry++ {
+		written, err := worker.DownloadRangeWithOptions(ctx, writer, key, payloadURL, segment, file.SizeBytes, TransferOptions{Limiter: limiter, GlobalLimiter: m.globalLimiter, Meter: meter, ReadIdleTimeout: m.readIdleTimeout})
+		if err == nil {
+			return written, nil
+		}
+		class := ClassifyRetry(err)
+		if class == RetryQuota {
+			var status *HTTPStatusError
+			retryAfter := time.Duration(0)
+			if errors.As(err, &status) {
+				retryAfter, _ = ParseRetryAfter(status.RetryAfter, m.now())
+			}
+			return written, &QuotaError{Cause: err, RetryAfter: retryAfter}
+		}
+		if class == RetryRefreshURL && refreshes < 1 {
+			refreshes++
+			newURL, refreshErr := m.refreshPayloadURL(ctx, job, &file, client)
+			if refreshErr == nil {
+				payloadURL = newURL
+				continue
+			}
+			err = fmt.Errorf("refresh MEGA payload URL: %w", refreshErr)
+			class = ClassifyRetry(err)
+		}
+		if (class != RetryTransport && class != RetryRateLimit && class != RetryServer) || retry >= m.normalRetryLimit {
+			return written, err
+		}
+		statusRetryAfter := ""
+		var status *HTTPStatusError
+		if errors.As(err, &status) {
+			statusRetryAfter = status.RetryAfter
+		}
+		delay := ExponentialBackoff(retry+1, statusRetryAfter, m.now(), nil)
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return written, ctx.Err()
+		}
+	}
+}
+
+func (m *Manager) workerForJob(job *store.DownloadJobRecord) (*RangeWorker, *mega.Client, error) {
+	client := m.mega
+	if job.AccountID != "" {
+		credentialCipher, sessionCipher, err := m.db.MegaAccountSecrets(context.Background(), job.AccountID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load account: %w", err)
+		}
+		if len(sessionCipher) > 0 {
+			session, err := m.secrets.Decrypt(sessionCipher)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decrypt account session: %w", err)
+			}
+			client = client.WithSession(string(session))
+		} else if len(credentialCipher) > 0 {
+			account, accountErr := m.db.GetMegaAccount(context.Background(), job.AccountID)
+			if accountErr != nil {
+				return nil, nil, accountErr
+			}
+			password, decryptErr := m.secrets.Decrypt(credentialCipher)
+			if decryptErr != nil {
+				return nil, nil, fmt.Errorf("decrypt account credential: %w", decryptErr)
+			}
+			session, loginErr := client.LoginAccount(account.Email, string(password))
+			if loginErr != nil {
+				return nil, nil, fmt.Errorf("MEGA account login failed")
+			}
+			sessionCipher, encryptErr := m.secrets.Encrypt([]byte(session))
+			if encryptErr != nil {
+				return nil, nil, encryptErr
+			}
+			_ = m.db.UpdateMegaAccount(context.Background(), account.ID, account.Label, account.Email, nil, sessionCipher, "active", account.DefaultForDownloads, m.now())
+			client = client.WithSession(session)
+		}
+	}
+	if job.ProxyID == "" || m.transportPool == nil {
+		if job.ProxyID != "" && m.transportPool == nil {
+			return nil, nil, fmt.Errorf("proxy transport pool is unavailable")
+		}
+		return m.worker, client, nil
+	}
+	profile, err := m.db.GetProxyProfile(context.Background(), job.ProxyID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load proxy profile: %w", err)
+	}
+	if !profile.Enabled {
+		return nil, nil, fmt.Errorf("proxy profile is disabled")
+	}
+	passwordCipher, err := m.db.ProxySecret(context.Background(), job.ProxyID)
+	if err != nil {
+		return nil, nil, err
+	}
+	password := ""
+	if len(passwordCipher) > 0 {
+		plain, err := m.secrets.Decrypt(passwordCipher)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decrypt proxy password: %w", err)
+		}
+		password = string(plain)
+	}
+	httpClient, err := m.transportPool.Client(network.ProxyProfile{ID: profile.ID, Name: profile.Name, Type: network.ProxyType(profile.Type), Host: profile.Host, Port: profile.Port, Username: profile.Username, Password: password, Timeout: time.Duration(profile.TimeoutSeconds) * time.Second, Enabled: profile.Enabled})
+	if err != nil {
+		return nil, nil, err
+	}
+	client = client.WithHTTPClient(httpClient)
+	return NewRangeWorker(client), client, nil
+}
+
+func (m *Manager) refreshPayloadURL(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord, client *mega.Client) (string, error) {
+	raw, err := m.secrets.Decrypt(job.SourceKeyCiphertext)
+	if err != nil {
+		return "", err
+	}
+	link := mega.PublicLink{Kind: mega.LinkKind(job.SourceKind), Handle: job.SourceHandle, Key: string(raw), SelectedPath: job.SourceSelectedPath, SelectedNode: job.SourceSelectedNode}
+	url, err := client.RefreshPayloadURL(ctx, link, file.RemoteNodeID)
+	if err != nil {
+		return "", err
+	}
+	ciphertext, err := m.secrets.Encrypt([]byte(url))
+	if err != nil {
+		return "", err
+	}
+	if err := m.db.UpdateDownloadPayloadURL(context.Background(), file.ID, ciphertext, m.now()); err != nil {
+		return "", err
+	}
+	file.PayloadURLCiphertext = ciphertext
+	return url, nil
 }
 
 type segmentResult struct {

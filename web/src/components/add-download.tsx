@@ -1,7 +1,14 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { APIError, createDownload, resolveDownload, type ResolvedDownload } from "@/api/client";
+import {
+  APIError,
+  createDownload,
+  listAccounts,
+  listProxies,
+  resolveDownload,
+  type ResolvedDownload,
+} from "@/api/client";
 
 function formatBytes(value: number, unitLabels: string[]) {
   if (value < 1024) return `${value} ${unitLabels[0]}`;
@@ -22,11 +29,15 @@ export function AddDownload() {
   const [url, setURL] = useState("");
   const [destination, setDestination] = useState("");
   const [startImmediately, setStartImmediately] = useState(true);
+  const [accountId, setAccountId] = useState("");
+  const [proxyId, setProxyId] = useState("");
   const [resolved, setResolved] = useState<ResolvedDownload | null>(null);
   const [message, setMessage] = useState("");
+  const accounts = useQuery({ queryKey: ["accounts"], queryFn: listAccounts });
+  const proxies = useQuery({ queryKey: ["proxies"], queryFn: listProxies });
 
   const resolveMutation = useMutation({
-    mutationFn: () => resolveDownload(url),
+    mutationFn: () => resolveDownload(url, accountId),
     onSuccess: (value) => {
       setResolved(value);
       setMessage("");
@@ -38,7 +49,13 @@ export function AddDownload() {
   });
   const createMutation = useMutation({
     mutationFn: () =>
-      createDownload({ url, destinationSubdirectory: destination, startImmediately }),
+      createDownload({
+        url,
+        accountId,
+        proxyId,
+        destinationSubdirectory: destination,
+        startImmediately,
+      }),
     onSuccess: () => {
       setURL("");
       setDestination("");
@@ -59,7 +76,9 @@ export function AddDownload() {
           <p className="mt-1 text-sm text-slate-400">{t("download.addDescription")}</p>
         </div>
         <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
-          {t("download.anonymous")}
+          {accountId
+            ? accounts.data?.find((item) => item.id === accountId)?.label
+            : t("download.anonymous")}
         </span>
       </div>
       <div className="space-y-4">
@@ -78,20 +97,32 @@ export function AddDownload() {
             <span className="text-sm font-medium text-slate-300">{t("download.account")}</span>
             <select
               className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-400"
-              disabled
-              value="anonymous"
+              value={accountId}
+              onChange={(event) => setAccountId(event.target.value)}
             >
-              <option value="anonymous">{t("download.anonymous")}</option>
+              <option value="">{t("download.anonymous")}</option>
+              {accounts.data?.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label} ({account.email})
+                </option>
+              ))}
             </select>
           </label>
           <label className="block space-y-2">
             <span className="text-sm font-medium text-slate-300">{t("download.proxy")}</span>
             <select
               className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-400"
-              disabled
-              value="direct"
+              value={proxyId}
+              onChange={(event) => setProxyId(event.target.value)}
             >
-              <option value="direct">{t("download.direct")}</option>
+              <option value="">{t("download.direct")}</option>
+              {proxies.data
+                ?.filter((item) => item.enabled)
+                .map((proxy) => (
+                  <option key={proxy.id} value={proxy.id}>
+                    {proxy.name} ({proxy.type})
+                  </option>
+                ))}
             </select>
           </label>
         </div>

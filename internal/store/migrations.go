@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const initialMigrationVersion = 1
+const initialMigrationVersion = 2
 
 // initialMigrationSQL is kept in the binary because megad is intentionally a
 // single self-contained executable. The checked-in SQL file is the readable
@@ -115,6 +115,14 @@ CREATE TABLE IF NOT EXISTS download_events (
 CREATE INDEX IF NOT EXISTS download_events_job_id_idx ON download_events(job_id, id DESC);
 `
 
+const migration2SQL = `
+ALTER TABLE download_jobs ADD COLUMN quota_next_retry_at TEXT;
+ALTER TABLE download_jobs ADD COLUMN quota_retry_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE download_jobs ADD COLUMN last_error_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE download_jobs ADD COLUMN last_error_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE proxy_profiles ADD COLUMN default_for_downloads INTEGER NOT NULL DEFAULT 0 CHECK(default_for_downloads IN (0, 1));
+`
+
 func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
@@ -127,24 +135,38 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?)`, initialMigrationVersion).Scan(&applied); err != nil {
 		return fmt.Errorf("check migration %d: %w", initialMigrationVersion, err)
 	}
-	if applied {
-		return nil
+	if !applied {
+		if err := applyMigration(ctx, db, 1, initialMigrationSQL); err != nil {
+			return err
+		}
 	}
+	var secondApplied bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?)`, 2).Scan(&secondApplied); err != nil {
+		return fmt.Errorf("check migration 2: %w", err)
+	}
+	if !secondApplied {
+		if err := applyMigration(ctx, db, 2, migration2SQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func applyMigration(ctx context.Context, db *sql.DB, version int, sqlText string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin migration %d: %w", initialMigrationVersion, err)
+		return fmt.Errorf("begin migration %d: %w", version, err)
 	}
-	if _, err := tx.ExecContext(ctx, initialMigrationSQL); err != nil {
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("apply migration %d: %w", initialMigrationVersion, err)
+		return fmt.Errorf("apply migration %d: %w", version, err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)`, initialMigrationVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)`, version, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("record migration %d: %w", initialMigrationVersion, err)
+		return fmt.Errorf("record migration %d: %w", version, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration %d: %w", initialMigrationVersion, err)
+		return fmt.Errorf("commit migration %d: %w", version, err)
 	}
 	return nil
 }

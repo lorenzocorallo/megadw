@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	goMega "github.com/t3rm1n4l/go-mega"
 )
 
 const (
@@ -50,6 +52,45 @@ type Client struct {
 	httpClient *http.Client
 	apiURL     string
 	sequence   atomic.Uint64
+	session    string
+}
+
+// WithSession returns a lightweight client sharing the HTTP transport and API
+// endpoint while authenticating API commands with the selected account. The
+// session is never serialized or included in an error string.
+func (c *Client) WithSession(session string) *Client {
+	if c == nil {
+		return nil
+	}
+	return &Client{httpClient: c.httpClient, apiURL: c.apiURL, session: session}
+}
+
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.httpClient
+}
+func (c *Client) WithHTTPClient(client *http.Client) *Client {
+	if c == nil {
+		return nil
+	}
+	return &Client{httpClient: client, apiURL: c.apiURL, session: c.session}
+}
+
+// LoginAccount uses the maintained go-mega authentication primitive and
+// returns only its opaque session identifier. MFA-required errors are passed
+// through so callers can present the explicit unsupported-account message.
+func (c *Client) LoginAccount(email, password string) (string, error) {
+	if c == nil || c.httpClient == nil {
+		return "", fmt.Errorf("MEGA HTTP client is unavailable")
+	}
+	account := goMega.New().SetClient(c.httpClient).SetLogger(nil).SetDebugger(nil)
+	account.SetAPIUrl(strings.TrimSuffix(c.apiURL, "/cs"))
+	if err := account.Login(email, password); err != nil {
+		return "", err
+	}
+	return account.GetSessionID(), nil
 }
 
 // NewClient constructs a public-link client. apiBaseURL may be either the
@@ -103,6 +144,32 @@ func (c *Client) FetchPayloadRange(ctx context.Context, payloadURL string, start
 		return nil, fmt.Errorf("MEGA payload request failed")
 	}
 	return response, nil
+}
+
+// RefreshPayloadURL requests a new opaque payload URL for an already-created
+// file. It deliberately performs metadata-only protocol work and never
+// downloads file bytes.
+func (c *Client) RefreshPayloadURL(ctx context.Context, link PublicLink, nodeID string) (string, error) {
+	if link.Kind == LinkKindFile {
+		return c.payloadFromCommand(ctx, map[string]any{"a": "g", "g": 1, "p": link.Handle}, "")
+	}
+	return c.payloadFromCommand(ctx, map[string]any{"a": "g", "g": 1, "n": nodeID}, link.Handle)
+}
+
+func (c *Client) payloadFromCommand(ctx context.Context, command map[string]any, folderHandle string) (string, error) {
+	response, err := c.command(ctx, []map[string]any{command}, folderHandle)
+	if err != nil {
+		return "", err
+	}
+	object, err := firstObject(response)
+	if err != nil {
+		return "", err
+	}
+	payload := stringValue(object["g"])
+	if payload == "" {
+		return "", fmt.Errorf("%w: refreshed payload URL is missing", ErrInvalidLink)
+	}
+	return payload, nil
 }
 
 // ResolveLink resolves a public file or folder link. accountID is accepted for
@@ -405,6 +472,9 @@ func (c *Client) command(ctx context.Context, payload []map[string]any, folderHa
 	query.Set("id", strconv.FormatUint(c.sequence.Add(1), 10))
 	if folderHandle != "" {
 		query.Set("n", folderHandle)
+	}
+	if c.session != "" {
+		query.Set("sid", c.session)
 	}
 	endpoint.RawQuery = query.Encode()
 

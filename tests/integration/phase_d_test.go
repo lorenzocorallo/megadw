@@ -665,6 +665,10 @@ func insertPhaseDJobWithSegment(t testing.TB, db *store.DB, secrets *store.Secre
 		t.Fatalf("fixture files = %d", len(job.Files))
 	}
 	file := job.Files[0]
+	parsedLink, err := mega.ParseLink(linkURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	planner, err := download.NewSegmentPlanner(file.Size, segmentSize)
 	if err != nil {
 		t.Fatal(err)
@@ -684,7 +688,7 @@ func insertPhaseDJobWithSegment(t testing.TB, db *store.DB, secrets *store.Secre
 	record, err := db.InsertDownloadJob(context.Background(), store.DownloadJobInput{
 		ID:                  jobID,
 		SourceKind:          string(job.Kind),
-		SourceHandle:        "fixture",
+		SourceHandle:        parsedLink.Handle,
 		SourceKeyCiphertext: sourceKey,
 		DisplayName:         job.DisplayName,
 		TotalBytes:          job.TotalBytes,

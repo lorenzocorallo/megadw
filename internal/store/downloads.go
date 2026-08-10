@@ -58,6 +58,10 @@ type DownloadJobRecord struct {
 	State               string               `json:"state"`
 	CreatedAt           time.Time            `json:"createdAt"`
 	UpdatedAt           time.Time            `json:"updatedAt"`
+	QuotaNextRetryAt    *time.Time           `json:"quotaNextRetryAt,omitempty"`
+	QuotaRetryIndex     int                  `json:"quotaRetryIndex,omitempty"`
+	LastErrorCode       string               `json:"lastErrorCode,omitempty"`
+	LastErrorMessage    string               `json:"lastErrorMessage,omitempty"`
 	SourceKeyCiphertext []byte               `json:"-"`
 	Files               []DownloadFileRecord `json:"files"`
 }
@@ -181,14 +185,15 @@ func (d *DB) InsertDownloadJob(ctx context.Context, input DownloadJobInput) (Dow
 func (d *DB) GetDownloadJob(ctx context.Context, id string) (DownloadJobRecord, error) {
 	var record DownloadJobRecord
 	var created, updated string
+	var recordQuotaNextRetry sql.NullString
 	err := d.QueryRowContext(ctx, `SELECT id, source_kind, source_handle, source_key_ciphertext,
         source_selected_path, source_selected_node, display_name, total_bytes, COALESCE(account_id, ''),
         COALESCE(proxy_id, ''), destination_subdirectory, complete_root, incomplete_root, state,
-        created_at, updated_at FROM download_jobs WHERE id = ?`, id).Scan(
+		created_at, updated_at, quota_next_retry_at, quota_retry_index, last_error_code, last_error_message FROM download_jobs WHERE id = ?`, id).Scan(
 		&record.ID, &record.SourceKind, &record.SourceHandle, &record.SourceKeyCiphertext,
 		&record.SourceSelectedPath, &record.SourceSelectedNode, &record.DisplayName, &record.TotalBytes,
 		&record.AccountID, &record.ProxyID, &record.DestinationSubdir, &record.CompleteRoot,
-		&record.IncompleteRoot, &record.State, &created, &updated)
+		&record.IncompleteRoot, &record.State, &created, &updated, &recordQuotaNextRetry, &record.QuotaRetryIndex, &record.LastErrorCode, &record.LastErrorMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DownloadJobRecord{}, ErrNotFound
 	}
@@ -203,6 +208,13 @@ func (d *DB) GetDownloadJob(ctx context.Context, id string) (DownloadJobRecord, 
 	record.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updated)
 	if parseErr != nil {
 		return DownloadJobRecord{}, fmt.Errorf("parse download updated_at: %w", parseErr)
+	}
+	if recordQuotaNextRetry.Valid && recordQuotaNextRetry.String != "" {
+		value, err := time.Parse(time.RFC3339Nano, recordQuotaNextRetry.String)
+		if err != nil {
+			return DownloadJobRecord{}, fmt.Errorf("parse quota retry time: %w", err)
+		}
+		record.QuotaNextRetryAt = &value
 	}
 	record.SourceKeyCiphertext = append([]byte(nil), record.SourceKeyCiphertext...)
 	rows, err := d.QueryContext(ctx, `SELECT id, job_id, remote_node_id, remote_path, final_relative_path,
@@ -411,6 +423,49 @@ func (d *DB) SetDownloadJobState(ctx context.Context, jobID, state string, when 
 		return fmt.Errorf("check download job update %q: %w", jobID, err)
 	} else if affected != 1 {
 		return fmt.Errorf("download job %q: %w", jobID, ErrNotFound)
+	}
+	return nil
+}
+
+// SetDownloadQuotaState persists the wait deadline and diagnostic atomically
+// with the job state. The deadline is durable so a restart cannot turn quota
+// handling into a tight retry loop.
+func (d *DB) SetDownloadQuotaState(ctx context.Context, jobID, state, code, message string, next *time.Time, retryIndex int, when time.Time) error {
+	when = when.UTC()
+	if when.IsZero() {
+		when = time.Now().UTC()
+	}
+	var nextText any
+	if next != nil {
+		nextText = next.UTC().Format(time.RFC3339Nano)
+	}
+	result, err := d.ExecContext(ctx, `UPDATE download_jobs SET state=?, quota_next_retry_at=?, quota_retry_index=?, last_error_code=?, last_error_message=?, updated_at=? WHERE id=?`, state, nextText, retryIndex, code, message, when.Format(time.RFC3339Nano), jobID)
+	if err != nil {
+		return fmt.Errorf("update quota state %q: %w", jobID, err)
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
+		return fmt.Errorf("download job %q: %w", jobID, ErrNotFound)
+	}
+	return nil
+}
+
+func (d *DB) ClearDownloadQuotaState(ctx context.Context, jobID, state string, when time.Time) error {
+	return d.SetDownloadQuotaState(ctx, jobID, state, "", "", nil, 0, when)
+}
+
+func (d *DB) UpdateDownloadPayloadURL(ctx context.Context, fileID string, ciphertext []byte, when time.Time) error {
+	when = when.UTC()
+	if when.IsZero() {
+		when = time.Now().UTC()
+	}
+	result, err := d.ExecContext(ctx, `UPDATE download_files SET payload_url_ciphertext=?, updated_at=? WHERE id=?`, ciphertext, when.Format(time.RFC3339Nano), fileID)
+	if err != nil {
+		return fmt.Errorf("update payload URL %q: %w", fileID, err)
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
+		return fmt.Errorf("download file %q: %w", fileID, ErrNotFound)
 	}
 	return nil
 }

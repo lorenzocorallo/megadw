@@ -32,6 +32,10 @@ func parseHashcashChallenge(header string) (hashcashChallenge, bool) {
 	if err != nil || easiness < 0 || easiness > 255 || parts[3] == "" {
 		return hashcashChallenge{}, false
 	}
+	token, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil || len(token) == 0 || len(token) > hashcashTokenSlot {
+		return hashcashChallenge{}, false
+	}
 	return hashcashChallenge{easiness: easiness, token: parts[3]}, true
 }
 
@@ -63,15 +67,15 @@ func solveHashcash(ctx context.Context, challenge hashcashChallenge, timeout tim
 		workersWG.Wait()
 	}()
 	for worker := 0; worker < workers; worker++ {
-		go func() {
+		go func(worker int) {
 			defer workersWG.Done()
-			if value := generateHashcash(workCtx, challenge.token, challenge.easiness); value != "" {
+			if value := generateHashcash(workCtx, challenge.token, challenge.easiness, uint32(worker+1), uint32(workers)); value != "" {
 				select {
 				case result <- value:
 				case <-workCtx.Done():
 				}
 			}
-		}()
+		}(worker)
 	}
 	select {
 	case value := <-result:
@@ -84,7 +88,7 @@ func solveHashcash(ctx context.Context, challenge hashcashChallenge, timeout tim
 	}
 }
 
-func generateHashcash(ctx context.Context, token string, easiness int) string {
+func generateHashcash(ctx context.Context, token string, easiness int, prefix, stride uint32) string {
 	if strings.ContainsAny(token, "+/=") {
 		return ""
 	}
@@ -100,29 +104,25 @@ func generateHashcash(ctx context.Context, token string, easiness int) string {
 	for index := 0; index < hashcashReplications; index++ {
 		copy(buffer[4+index*hashcashTokenSlot:], tokenBytes)
 	}
-	var prefix [4]byte
-	for iteration := 0; ; iteration++ {
-		if iteration%1000 == 0 {
-			select {
-			case <-ctx.Done():
-				return ""
-			default:
-			}
+	if stride == 0 {
+		stride = 1
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ""
+		default:
 		}
-		for index := range prefix {
-			buffer[index]++
-			if buffer[index] != 0 {
-				break
-			}
-			if index == len(prefix)-1 {
-				return ""
-			}
-		}
-		copy(prefix[:], buffer[:4])
+		binary.LittleEndian.PutUint32(buffer[:4], prefix)
 		digest := sha256.Sum256(buffer)
 		if binary.BigEndian.Uint32(digest[:4]) <= threshold {
-			return base64.RawURLEncoding.EncodeToString(prefix[:])
+			return base64.RawURLEncoding.EncodeToString(buffer[:4])
 		}
+		next := prefix + stride
+		if next < prefix {
+			return ""
+		}
+		prefix = next
 	}
 }
 

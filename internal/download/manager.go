@@ -972,28 +972,22 @@ func removeCompletedFiles(job store.DownloadJobRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := root.Ensure(); err != nil {
-		return err
-	}
+	defer root.Close()
 	for _, file := range job.Files {
 		if FileState(file.State) != FileCompleted || file.FinalRelativePath == "" {
 			continue
 		}
-		path, err := root.Resolve(file.FinalRelativePath)
-		if err != nil {
-			return err
-		}
-		info, statErr := os.Lstat(path)
+		info, statErr := root.Lstat(file.FinalRelativePath)
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
 		if statErr != nil {
 			return fmt.Errorf("inspect completed file: %w", statErr)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if info.IsSymlink() {
 			return fmt.Errorf("refusing to remove symlinked completed file")
 		}
-		if err := os.Remove(path); err != nil {
+		if err := root.Remove(file.FinalRelativePath); err != nil {
 			return fmt.Errorf("remove completed file: %w", err)
 		}
 	}
@@ -1036,27 +1030,12 @@ func (m *Manager) removePartialDirectory(job store.DownloadJobRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := root.Ensure(); err != nil {
-		return err
-	}
+	defer root.Close()
 	relative, err := fsroot.SanitizeComponent(job.ID)
 	if err != nil {
 		return err
 	}
-	directory, err := root.Join(relative)
-	if err != nil {
-		return err
-	}
-	if info, statErr := os.Lstat(directory); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to remove symlinked partial directory")
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect partial directory: %w", statErr)
-	} else {
-		return nil
-	}
-	if err := os.RemoveAll(directory); err != nil {
+	if err := root.RemoveAll(relative); err != nil {
 		return fmt.Errorf("remove partial directory: %w", err)
 	}
 	return nil
@@ -1429,6 +1408,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	if err != nil {
 		return err
 	}
+	defer incompleteRoot.Close()
 	partial, existed, err := OpenPartialFile(incompleteRoot, job.ID, file.RemotePath, file.SizeBytes)
 	if err != nil {
 		return err
@@ -1581,11 +1561,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	}
 	file.State = string(FileVerifying)
 	m.publishJobSnapshot(job.ID)
-	if err := partial.Close(); err != nil {
-		return fmt.Errorf("close partial file before verification: %w", err)
-	}
-	closed = true
-	if err := VerifyPartialFileContext(ctx, partial.Path(), file.SizeBytes, key); err != nil {
+	if err := VerifyPartialFileContext(ctx, partial.File(), file.SizeBytes, key); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1594,7 +1570,12 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 		m.publishJobSnapshot(job.ID)
 		return err
 	}
-	finalRelativePath, err := m.finalize(ctx, job, file, partial.Path())
+	partialRelativePath := partial.RelativePath()
+	if err := partial.Close(); err != nil {
+		return fmt.Errorf("close partial file before finalization: %w", err)
+	}
+	closed = true
+	finalRelativePath, err := m.finalize(ctx, job, file, partialRelativePath)
 	if err != nil {
 		if errors.Is(err, ErrFinalizationPending) {
 			return err
@@ -1846,16 +1827,13 @@ func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRe
 	if err != nil {
 		return false, err
 	}
+	defer incompleteRoot.Close()
 	partialRelative, err := PartialRelativePath(job.ID, file.RemotePath)
 	if err != nil {
 		return false, err
 	}
-	partialPath, err := incompleteRoot.Join(partialRelative)
-	if err != nil {
-		return false, err
-	}
 	partialExists := false
-	if _, statErr := os.Lstat(partialPath); statErr == nil {
+	if _, statErr := incompleteRoot.Lstat(partialRelative); statErr == nil {
 		partialExists = true
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("inspect partial file during move recovery: %w", statErr)
@@ -1865,11 +1843,9 @@ func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRe
 	if err != nil {
 		return false, err
 	}
-	target, err := completeRoot.Prepare(file.FinalRelativePath)
-	if err != nil {
-		return false, err
-	}
-	if _, statErr := os.Lstat(target); statErr != nil {
+	defer completeRoot.Close()
+	targetInfo, statErr := completeRoot.Lstat(file.FinalRelativePath)
+	if statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
 			if partialExists {
 				return false, nil
@@ -1877,6 +1853,9 @@ func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRe
 			return false, fmt.Errorf("move recovery found neither partial file nor final target %q", file.FinalRelativePath)
 		}
 		return false, fmt.Errorf("inspect final target during move recovery: %w", statErr)
+	}
+	if targetInfo.IsSymlink() {
+		return false, fmt.Errorf("%w: recovered final target is a symlink", fsroot.ErrSymlink)
 	}
 	rawKey, err := m.secrets.Decrypt(file.FileKeyCiphertext)
 	if err != nil {
@@ -1886,17 +1865,26 @@ func (m *Manager) recoverMovedFile(ctx context.Context, job *store.DownloadJobRe
 	if err != nil {
 		return false, err
 	}
-	if err := VerifyPartialFileContext(ctx, target, file.SizeBytes, key); err != nil {
+	targetFile, err := completeRoot.OpenFile(file.FinalRelativePath, os.O_RDONLY, 0)
+	if err != nil {
+		return false, fmt.Errorf("open final target during move recovery: %w", err)
+	}
+	verifyErr := VerifyPartialFileContext(ctx, targetFile, file.SizeBytes, key)
+	closeErr := targetFile.Close()
+	if verifyErr != nil {
 		if partialExists {
 			return false, nil
 		}
-		return false, fmt.Errorf("verify final target during move recovery: %w", err)
+		return false, fmt.Errorf("verify final target during move recovery: %w", verifyErr)
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close final target during move recovery: %w", closeErr)
 	}
 	if partialExists {
-		if err := os.Remove(partialPath); err != nil {
+		if err := incompleteRoot.Remove(partialRelative); err != nil {
 			return false, fmt.Errorf("remove recovered partial link: %w", err)
 		}
-		if err := syncDirectory(filepath.Dir(partialPath)); err != nil {
+		if err := incompleteRoot.SyncDir(relativeParent(partialRelative)); err != nil {
 			return false, fmt.Errorf("sync recovered incomplete directory: %w", err)
 		}
 	}
@@ -1912,11 +1900,17 @@ var (
 	ErrFinalizationPending = errors.New("atomic rename succeeded but completion persistence is pending")
 )
 
-func (m *Manager) finalize(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord, partialPath string) (string, error) {
+func (m *Manager) finalize(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord, partialRelative string) (string, error) {
+	incompleteRoot, err := fsRoot(job.IncompleteRoot)
+	if err != nil {
+		return "", err
+	}
+	defer incompleteRoot.Close()
 	completeRoot, err := fsRoot(job.CompleteRoot)
 	if err != nil {
 		return "", err
 	}
+	defer completeRoot.Close()
 	policy := m.conflictPolicy
 	if policy == "" && m.settings != nil {
 		if value, settingsErr := m.settings.Get(context.Background()); settingsErr == nil {
@@ -1928,52 +1922,45 @@ func (m *Manager) finalize(ctx context.Context, job *store.DownloadJobRecord, fi
 	}
 	m.finalMu.Lock()
 	defer m.finalMu.Unlock()
-	target, err := completeRoot.ResolveConflict(file.FinalRelativePath, policy)
-	if err != nil {
-		return "", err
-	}
-	relative, err := filepath.Rel(completeRoot.Path(), target)
-	if err != nil || relative == ".." || len(relative) >= 3 && relative[:3] == ".."+string(filepath.Separator) {
-		return "", fmt.Errorf("resolve final relative path")
-	}
-	if err := m.db.PrepareDownloadFileMove(ctx, file.ID, relative, m.now()); err != nil {
-		return "", err
-	}
-	if err := renameCompletedFile(os.Rename, partialPath, target, file.FinalRelativePath); err != nil {
-		return "", err
-	}
-	if err := syncDirectory(filepath.Dir(target)); err != nil {
-		return "", fmt.Errorf("%w: sync complete directory: %v", ErrFinalizationPending, err)
-	}
-	if sourceParent := filepath.Dir(partialPath); filepath.Clean(sourceParent) != filepath.Clean(filepath.Dir(target)) {
-		if err := syncDirectory(sourceParent); err != nil {
+	for attempt := 0; attempt <= 100_000; attempt++ {
+		target, planErr := completeRoot.PlanConflict(file.FinalRelativePath, policy)
+		if planErr != nil {
+			return "", planErr
+		}
+		// Persist the exact candidate before attempting the atomic move. If
+		// the no-replace rename loses a concurrent conflict race, the next
+		// iteration selects and persists a new exact candidate.
+		if err := m.db.PrepareDownloadFileMove(ctx, file.ID, target, m.now()); err != nil {
+			return "", err
+		}
+		overwrite := policy == fsroot.ConflictOverwrite
+		renameErr := completeRoot.RenameFrom(incompleteRoot, partialRelative, target, overwrite)
+		if errors.Is(renameErr, fsroot.ErrConflict) && policy == fsroot.ConflictRename {
+			continue
+		}
+		if renameErr != nil {
+			if errors.Is(renameErr, syscall.EXDEV) {
+				return "", fmt.Errorf("%w: cannot atomically rename %q into complete root", ErrCrossDevice, file.FinalRelativePath)
+			}
+			return "", renameErr
+		}
+		if err := completeRoot.SyncDir(relativeParent(target)); err != nil {
+			return "", fmt.Errorf("%w: sync complete directory: %v", ErrFinalizationPending, err)
+		}
+		if err := incompleteRoot.SyncDir(relativeParent(partialRelative)); err != nil {
 			return "", fmt.Errorf("%w: sync incomplete directory: %v", ErrFinalizationPending, err)
 		}
+		return target, nil
 	}
-	return relative, nil
+	return "", fmt.Errorf("%w: exhausted atomic conflict candidates", fsroot.ErrConflict)
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
+func relativeParent(relative string) string {
+	parent := filepath.Dir(relative)
+	if parent == "." {
+		return ""
 	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	if syncErr != nil {
-		return syncErr
-	}
-	return closeErr
-}
-
-func renameCompletedFile(rename func(string, string) error, partialPath, target, relativePath string) error {
-	if err := rename(partialPath, target); err != nil {
-		if errors.Is(err, syscall.EXDEV) {
-			return fmt.Errorf("%w: cannot atomically rename %q into complete root", ErrCrossDevice, relativePath)
-		}
-		return fmt.Errorf("rename completed partial file: %w", err)
-	}
-	return nil
+	return parent
 }
 
 func fsRoot(path string) (*fsroot.Root, error) {

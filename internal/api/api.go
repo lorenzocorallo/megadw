@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -831,6 +830,7 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusInternalServerError, "settings_error", "configured complete root is invalid", nil)
 		return
 	}
+	defer completeRoot.Close()
 	for _, file := range job.Files {
 		relativePath, err := fsroot.SanitizeRelativePath(file.RelativePath)
 		if err != nil {
@@ -840,14 +840,9 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		relativePath = uniqueRelativePath(relativePath, seenPaths)
 		finalRelativePath := joinRelative(destination, relativePath)
 		for {
-			plannedPath, planErr := completeRoot.PlanConflict(finalRelativePath, currentSettings.Downloads.ConflictPolicy)
+			plannedRelativePath, planErr := completeRoot.PlanConflict(finalRelativePath, currentSettings.Downloads.ConflictPolicy)
 			if planErr != nil {
 				writeError(writer, http.StatusBadRequest, "destination_conflict", planErr.Error(), nil)
-				return
-			}
-			plannedRelativePath, relErr := filepath.Rel(completeRoot.Path(), plannedPath)
-			if relErr != nil {
-				writeError(writer, http.StatusInternalServerError, "destination_invalid", "could not plan destination path", nil)
 				return
 			}
 			if _, alreadyUsed := seenPaths[plannedRelativePath]; alreadyUsed {

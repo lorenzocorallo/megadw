@@ -15,168 +15,109 @@ const (
 	ConflictFail      = "fail"
 )
 
-// ResolveConflict returns a safe destination for an already-sanitized
-// relative path. Rename preserves the extension and uses deterministic
-// "name (n).ext" candidates.
+// ResolveConflict chooses a relative destination for planning and API
+// metadata only. It does not reserve that name. Finalization must use
+// RenameFrom with an atomic no-replace rename for the chosen name.
 func (r *Root) ResolveConflict(relative, policy string) (string, error) {
-	target, err := r.Prepare(relative)
-	if err != nil {
-		return "", err
-	}
-	info, statErr := os.Lstat(target)
-	exists := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect destination: %w", statErr)
-	}
-	if exists && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: destination is a symlink", ErrSymlink)
-	}
-	if !exists || policy == ConflictOverwrite {
-		return target, nil
-	}
-	switch policy {
-	case ConflictFail:
-		return "", fmt.Errorf("%w: %s", ErrConflict, relative)
-	case ConflictRename:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("%w: destination is a symlink", ErrSymlink)
-		}
-		parent := filepath.Dir(target)
-		base := filepath.Base(target)
-		ext := filepath.Ext(base)
-		if ext == base {
-			ext = ""
-		}
-		stem := base[:len(base)-len(ext)]
-		for index := 1; index <= 100_000; index++ {
-			candidateName := stem + " (" + strconv.Itoa(index) + ")" + ext
-			candidateRel, err := filepath.Rel(r.path, filepath.Join(parent, candidateName))
-			if err != nil {
-				return "", fmt.Errorf("build conflict candidate: %w", err)
-			}
-			candidate, err := r.Prepare(candidateRel)
-			if err != nil {
-				return "", err
-			}
-			if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
-				return candidate, nil
-			} else if err != nil {
-				return "", fmt.Errorf("inspect conflict candidate: %w", err)
-			}
-		}
-		return "", fmt.Errorf("%w: exhausted rename candidates", ErrConflict)
-	default:
-		return "", fmt.Errorf("invalid conflict policy %q", policy)
-	}
+	return r.PlanConflict(relative, policy)
 }
 
-// PlanConflict performs the same collision and symlink checks without
-// creating the configured root or parent directories. It is used while a job
-// is being queued; the writer must call Prepare again immediately before
-// touching a file because another job may win the race afterwards.
+// PlanConflict performs an anchored metadata lookup and returns a sanitized
+// relative candidate. The result is deliberately not a pathname capability;
+// callers must use RenameFrom/OpenFile/etc. for the subsequent operation.
 func (r *Root) PlanConflict(relative, policy string) (string, error) {
-	target, err := r.Join(relative)
+	safe, err := SanitizeRelativePath(relative)
 	if err != nil {
 		return "", err
 	}
-	if err := checkExistingParents(r.path, filepath.Dir(target)); err != nil {
-		return "", err
+	if safe == "" {
+		return "", fmt.Errorf("%w: destination file is required", ErrInvalidPath)
 	}
-	info, statErr := os.Lstat(target)
-	exists := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect destination: %w", statErr)
-	}
-	if exists && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: destination is a symlink", ErrSymlink)
-	}
-	if !exists || policy == ConflictOverwrite {
-		return target, nil
-	}
-	switch policy {
-	case ConflictFail:
-		return "", fmt.Errorf("%w: %s", ErrConflict, relative)
-	case ConflictRename:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("%w: destination is a symlink", ErrSymlink)
-		}
-		parent := filepath.Dir(target)
-		base := filepath.Base(target)
-		ext := filepath.Ext(base)
-		if ext == base {
-			ext = ""
-		}
-		stem := base[:len(base)-len(ext)]
-		for index := 1; index <= 100_000; index++ {
-			candidateName := stem + " (" + strconv.Itoa(index) + ")" + ext
-			candidateRel, err := filepath.Rel(r.path, filepath.Join(parent, candidateName))
-			if err != nil {
-				return "", fmt.Errorf("build conflict candidate: %w", err)
-			}
-			candidate, err := r.Join(candidateRel)
-			if err != nil {
-				return "", err
-			}
-			if err := checkExistingParents(r.path, filepath.Dir(candidate)); err != nil {
-				return "", err
-			}
-			if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
-				return candidate, nil
-			} else if err != nil {
-				return "", fmt.Errorf("inspect conflict candidate: %w", err)
-			}
-		}
-		return "", fmt.Errorf("%w: exhausted rename candidates", ErrConflict)
-	default:
+	if policy != ConflictRename && policy != ConflictOverwrite && policy != ConflictFail {
 		return "", fmt.Errorf("invalid conflict policy %q", policy)
 	}
-}
 
-func checkExistingParents(root, parent string) error {
-	relative, err := filepath.Rel(root, parent)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return fmt.Errorf("%w: parent %q", ErrPathEscape, parent)
+	info, statErr := r.Lstat(safe)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return safe, nil
 	}
-	current := root
-	if err := checkExistingComponent(current); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if statErr != nil {
+		return "", fmt.Errorf("inspect destination: %w", statErr)
 	}
-	if relative == "." {
-		return nil
+	if info.IsSymlink() {
+		return "", fmt.Errorf("%w: destination is a symlink", ErrSymlink)
 	}
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if component == "" || component == "." {
-			continue
-		}
-		current = filepath.Join(current, component)
-		err := checkExistingComponent(current)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+	if policy == ConflictOverwrite {
+		return safe, nil
+	}
+	if policy == ConflictFail {
+		return "", fmt.Errorf("%w: %s", ErrConflict, safe)
+	}
+
+	parent, base := splitRelative(safe)
+	ext := filepath.Ext(base)
+	if ext == base {
+		ext = ""
+	}
+	stem := strings.TrimSuffix(base, ext)
+	for index := 1; index <= 100_000; index++ {
+		candidateName := stem + " (" + strconv.Itoa(index) + ")" + ext
+		candidate := filepath.Join(parent, candidateName)
+		candidate, err = SanitizeRelativePath(candidate)
 		if err != nil {
-			return err
+			return "", fmt.Errorf("build conflict candidate: %w", err)
+		}
+		candidateInfo, candidateErr := r.Lstat(candidate)
+		if errors.Is(candidateErr, os.ErrNotExist) {
+			return candidate, nil
+		}
+		if candidateErr != nil {
+			return "", fmt.Errorf("inspect conflict candidate: %w", candidateErr)
+		}
+		if candidateInfo.IsSymlink() {
+			return "", fmt.Errorf("%w: conflict candidate is a symlink", ErrSymlink)
 		}
 	}
-	return nil
+	return "", fmt.Errorf("%w: exhausted rename candidates", ErrConflict)
 }
 
-func checkExistingComponent(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
+// SanitizeComponent validates one remote or user-provided path component.
+// Slashes are rejected here so callers cannot smuggle a second component.
+func SanitizeComponent(component string) (string, error) {
+	if component == "" || component == "." || component == ".." {
+		return "", fmt.Errorf("%w: empty, dot, and dot-dot components are not allowed", ErrInvalidPath)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s", ErrSymlink, path)
+	if strings.IndexByte(component, 0) >= 0 || strings.ContainsAny(component, `/\\`) {
+		return "", fmt.Errorf("%w: component contains a path separator or NUL", ErrInvalidPath)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("controlled parent %q is not a directory", path)
-	}
-	return nil
+	return component, nil
 }
 
-// SanitizeDestinationSubdirectory is an explicit name for the browser-supplied
-// destination field, making it harder for API handlers to accidentally call a
-// less restrictive path helper.
+// SanitizeRelativePath sanitizes a slash-separated path while preserving
+// nested directories and Unicode names. Empty is the only accepted empty
+// path, which represents the root itself for optional subdirectories.
+func SanitizeRelativePath(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if strings.IndexByte(value, 0) >= 0 || filepath.IsAbs(value) || strings.HasPrefix(value, "/") || strings.Contains(value, `\`) {
+		return "", fmt.Errorf("%w: absolute paths, backslashes, and NUL are not allowed", ErrInvalidPath)
+	}
+	parts := strings.Split(value, "/")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		component, err := SanitizeComponent(part)
+		if err != nil {
+			return "", err
+		}
+		clean = append(clean, component)
+	}
+	return filepath.Join(clean...), nil
+}
+
+// SanitizeDestinationSubdirectory is an explicit name for the browser-
+// supplied destination field, making it harder for API handlers to call a
+// less restrictive path helper accidentally.
 func SanitizeDestinationSubdirectory(value string) (string, error) {
 	return SanitizeRelativePath(value)
 }

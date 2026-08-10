@@ -1,5 +1,31 @@
 # Release blockers
 
+## Filesystem confinement (resolved 2026-08-10)
+
+### Historical finding
+
+The previous `internal/fsroot` layer checked absolute pathnames with `Lstat`
+and then returned them to callers that later used `os.OpenFile`, `os.Rename`,
+`os.Remove`, `os.RemoveAll`, or pathname-based verification. A symlink could
+replace a checked parent between those operations and redirect access outside
+the configured root.
+
+### Resolution evidence
+
+`internal/fsroot` now securely opens each configured root and holds its
+descriptor. Nested directory creation, file open/resume, metadata lookup,
+verification, removal/recursive cleanup, directory sync, conflict handling,
+and cross-root finalization use descriptor-relative Linux operations with
+`O_NOFOLLOW`; finalization uses anchored `renameat`/`renameat2` and preserves
+`EXDEV`. Callers receive only relative names or already-open descriptors.
+
+Deterministic interposition tests cover partial creation, resume, deletion,
+recursive cleanup, final rename across unrelated roots, intermediate symlink
+rejection, atomic conflict behavior, and `EXDEV`. Phase-D recovery and
+same-name job tests continue to pass, including the race detector.
+
+Status: resolved; no known filesystem-confinement release blocker remains.
+
 ## Account login leaks an unowned MEGA event-polling client
 
 ### Failing assumption

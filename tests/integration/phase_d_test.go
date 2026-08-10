@@ -106,6 +106,7 @@ func TestPhaseDResumeUsesDurableBitmapAndSkipsFirstSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer partialRoot.Close()
 	partial, _, err := download.OpenPartialFile(partialRoot, jobID, fileRecord.RemotePath, fileRecord.SizeBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +196,7 @@ func TestPhaseDCrashBeforeCheckpointRedownloadsUncommittedSegment(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer partialRoot.Close()
 	partial, _, err := download.OpenPartialFile(partialRoot, jobID, fileRecord.RemotePath, fileRecord.SizeBytes)
 	if err != nil {
 		t.Fatal(err)

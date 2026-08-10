@@ -1,7 +1,6 @@
 package download
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,9 +13,9 @@ const PartialSuffix = ".mega.part"
 // PartialFile is the one sparse random-access file used for a remote file.
 // It never creates per-segment temporary files and never performs a merge.
 type PartialFile struct {
-	file *os.File
-	path string
-	size int64
+	file     *os.File
+	relative string
+	size     int64
 }
 
 // PartialRelativePath returns the job-scoped relative path for one remote
@@ -47,16 +46,7 @@ func OpenPartialFile(root *fsroot.Root, jobID, remotePath string, size int64) (*
 	if err != nil {
 		return nil, false, err
 	}
-	path, err := root.Prepare(relative)
-	if err != nil {
-		return nil, false, err
-	}
-	_, statErr := os.Lstat(path)
-	existed := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return nil, false, fmt.Errorf("inspect partial file: %w", statErr)
-	}
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	file, existed, err := root.OpenOrCreateFile(relative, 0o600)
 	if err != nil {
 		return nil, false, fmt.Errorf("open partial file: %w", err)
 	}
@@ -67,7 +57,7 @@ func OpenPartialFile(root *fsroot.Root, jobID, remotePath string, size int64) (*
 	if err := file.Truncate(size); err != nil {
 		return closeOnError(fmt.Errorf("size partial file: %w", err))
 	}
-	return &PartialFile{file: file, path: path, size: size}, existed, nil
+	return &PartialFile{file: file, relative: relative, size: size}, existed, nil
 }
 
 // OpenPartial is a concise alias for OpenPartialFile.
@@ -75,11 +65,20 @@ func OpenPartial(root *fsroot.Root, jobID, remotePath string, size int64) (*Part
 	return OpenPartialFile(root, jobID, remotePath, size)
 }
 
-func (p *PartialFile) Path() string {
+func (p *PartialFile) RelativePath() string {
 	if p == nil {
 		return ""
 	}
-	return p.path
+	return p.relative
+}
+
+// File returns the descriptor selected by the rooted open. It is intended for
+// integrity verification while the partial file is still open.
+func (p *PartialFile) File() *os.File {
+	if p == nil {
+		return nil
+	}
+	return p.file
 }
 
 func (p *PartialFile) Size() int64 {

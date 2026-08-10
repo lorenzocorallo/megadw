@@ -9,14 +9,15 @@ import (
 	"github.com/lorenzocorallo/megadw/internal/mega"
 )
 
-// VerifyPartialFile verifies a partial file without loading it into memory.
-func VerifyPartialFile(path string, size int64, key mega.FileKey) error {
-	return VerifyPartialFileContext(context.Background(), path, size, key)
+// VerifyPartialFile verifies an already-open partial file without loading it
+// into memory. The descriptor must have been obtained from fsroot.
+func VerifyPartialFile(file *os.File, size int64, key mega.FileKey) error {
+	return VerifyPartialFileContext(context.Background(), file, size, key)
 }
 
 // VerifyPartialFileContext makes the sequential integrity scan responsive to
 // pause, cancel, and shutdown between its bounded reads.
-func VerifyPartialFileContext(ctx context.Context, path string, size int64, key mega.FileKey) error {
+func VerifyPartialFileContext(ctx context.Context, file *os.File, size int64, key mega.FileKey) error {
 	if size < 0 {
 		return fmt.Errorf("negative file size")
 	}
@@ -26,11 +27,9 @@ func VerifyPartialFileContext(ctx context.Context, path string, size int64, key 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open partial file for verification: %w", err)
+	if file == nil {
+		return fmt.Errorf("partial file descriptor is required")
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat partial file for verification: %w", err)

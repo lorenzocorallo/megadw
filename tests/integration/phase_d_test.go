@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,6 +181,51 @@ func TestPhaseDResumeUsesDurableBitmapAndSkipsFirstSegment(t *testing.T) {
 	}
 }
 
+func TestPhaseDCrashBeforeCheckpointRedownloadsUncommittedSegment(t *testing.T) {
+	fixture := NewFakeMegaServer()
+	defer fixture.Close()
+	manager, db, secrets, roots := newPhaseDManager(t, fixture)
+	jobID := "phase-d-uncommitted"
+	fileRecord := insertPhaseDJob(t, db, secrets, fixture, roots, jobID, fixture.FileLink())
+	planner, err := download.NewSegmentPlanner(fileRecord.SizeBytes, fileRecord.SegmentSizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialRoot, err := fsroot.New(roots.incomplete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, _, err := download.OpenPartialFile(partialRoot, jobID, fileRecord.RemotePath, fileRecord.SizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := planner.Segment(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partial.WriteAt(fixture.Plaintext()[first.Start:first.End+1], first.Start); err != nil {
+		t.Fatal(err)
+	}
+	if err := partial.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before := fixture.PayloadRequestCount()
+	if err := manager.RunJob(context.Background(), jobID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.PayloadRequestCount() - before; got != planner.Count {
+		t.Fatalf("payload requests after uncheckpointed write = %d, want %d", got, planner.Count)
+	}
+	output, err := os.ReadFile(filepath.Join(roots.complete, "fixture.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output, fixture.Plaintext()) {
+		t.Fatal("output after uncheckpointed write recovery differs from fixture")
+	}
+}
+
 func TestPhaseDCorruptionFailsBeforeCompletion(t *testing.T) {
 	fixture := NewFakeMegaServerWithOptions(FakeMegaServerOptions{CorruptPayload: true, CorruptByteAt: 0})
 	defer fixture.Close()
@@ -240,6 +286,111 @@ func TestPhaseDSameNameJobsUseIndependentPartialFilesAndFinalConflictNames(t *te
 		if !bytes.Equal(output, fixture.Plaintext()) {
 			t.Fatalf("%s differs from fixture plaintext", name)
 		}
+	}
+}
+
+func TestPhaseDRecoversCrashAfterRenameBeforeCompletionPersistence(t *testing.T) {
+	fixture := NewFakeMegaServer()
+	defer fixture.Close()
+	manager, db, secrets, roots := newPhaseDManager(t, fixture)
+	jobID := "phase-d-move-recovery"
+	fileRecord := insertPhaseDJob(t, db, secrets, fixture, roots, jobID, fixture.FileLink())
+	planner, err := download.NewSegmentPlanner(fileRecord.SizeBytes, fileRecord.SegmentSizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bitmap, err := download.NewBitmap(planner.Count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := int64(0); index < planner.Count; index++ {
+		if err := bitmap.Set(index); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.CheckpointDownloadFiles(context.Background(), []store.DownloadFileCheckpoint{{
+		FileID: fileRecord.ID, CompletedBitmap: bitmap, BytesCommitted: fileRecord.SizeBytes,
+		State: string(download.FileVerifying), UpdatedAt: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(roots.complete, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	finalPath := filepath.Join(roots.complete, "fixture.txt")
+	final, err := os.OpenFile(finalPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := final.Write(fixture.Plaintext()); err != nil {
+		final.Close()
+		t.Fatal(err)
+	}
+	if err := final.Sync(); err != nil {
+		final.Close()
+		t.Fatal(err)
+	}
+	if err := final.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PrepareDownloadFileMove(context.Background(), fileRecord.ID, "fixture.txt", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetDownloadJobState(context.Background(), jobID, string(download.JobFinalizing), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := fixture.PayloadRequestCount()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForJobState(t, db, jobID, download.JobCompleted)
+	if got := fixture.PayloadRequestCount() - before; got != 0 {
+		t.Fatalf("move recovery made %d payload requests, want 0", got)
+	}
+	record, err := db.GetDownloadJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Files[0].State != string(download.FileCompleted) {
+		t.Fatalf("move-recovered file state = %q", record.Files[0].State)
+	}
+}
+
+func TestPhaseDCompletionPersistenceFailureKeepsMovedFileRecoverable(t *testing.T) {
+	fixture := NewFakeMegaServer()
+	defer fixture.Close()
+	manager, db, secrets, roots := newPhaseDManager(t, fixture)
+	jobID := "phase-d-completion-persist-failure"
+	insertPhaseDJob(t, db, secrets, fixture, roots, jobID, fixture.FileLink())
+	if _, err := db.Exec(`CREATE TRIGGER fail_file_completion
+		BEFORE UPDATE OF state ON download_files
+		WHEN NEW.state = 'completed'
+		BEGIN SELECT RAISE(FAIL, 'injected completion failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := manager.RunJob(context.Background(), jobID)
+	if !errors.Is(err, download.ErrFinalizationPending) {
+		t.Fatalf("completion persistence error = %v", err)
+	}
+	record, err := db.GetDownloadJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != string(download.JobPausedRecovery) || record.Files[0].State != string(download.FileMoving) {
+		t.Fatalf("recoverable state = %q/%q", record.State, record.Files[0].State)
+	}
+	if _, err := os.Stat(filepath.Join(roots.complete, "fixture.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_file_completion`); err != nil {
+		t.Fatal(err)
+	}
+	before := fixture.PayloadRequestCount()
+	if err := manager.RunJob(context.Background(), jobID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.PayloadRequestCount() - before; got != 0 {
+		t.Fatalf("completion recovery made %d payload requests, want 0", got)
 	}
 }
 
@@ -500,11 +651,11 @@ func newPhaseDManager(t *testing.T, fixture *FakeMegaServer) (*download.Manager,
 	return manager, db, secrets, roots
 }
 
-func insertPhaseDJob(t *testing.T, db *store.DB, secrets *store.SecretStore, fixture *FakeMegaServer, roots phaseDRoots, jobID, linkURL string) store.DownloadFileRecord {
+func insertPhaseDJob(t testing.TB, db *store.DB, secrets *store.SecretStore, fixture *FakeMegaServer, roots phaseDRoots, jobID, linkURL string) store.DownloadFileRecord {
 	return insertPhaseDJobWithSegment(t, db, secrets, fixture, roots, jobID, linkURL, 64<<10)
 }
 
-func insertPhaseDJobWithSegment(t *testing.T, db *store.DB, secrets *store.SecretStore, fixture *FakeMegaServer, roots phaseDRoots, jobID, linkURL string, segmentSize int64) store.DownloadFileRecord {
+func insertPhaseDJobWithSegment(t testing.TB, db *store.DB, secrets *store.SecretStore, fixture *FakeMegaServer, roots phaseDRoots, jobID, linkURL string, segmentSize int64) store.DownloadFileRecord {
 	t.Helper()
 	job, err := fixture.Client().ResolveLink(context.Background(), linkURL, "")
 	if err != nil {
@@ -559,7 +710,7 @@ func insertPhaseDJobWithSegment(t *testing.T, db *store.DB, secrets *store.Secre
 	return record.Files[0]
 }
 
-func mustParsedLinkKey(t *testing.T, rawURL string) string {
+func mustParsedLinkKey(t testing.TB, rawURL string) string {
 	t.Helper()
 	link, err := mega.ParseLink(rawURL)
 	if err != nil {

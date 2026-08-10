@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/auth"
 	"github.com/lorenzocorallo/megadw/internal/download"
 	"github.com/lorenzocorallo/megadw/internal/mega"
+	"github.com/lorenzocorallo/megadw/internal/network"
 	"github.com/lorenzocorallo/megadw/internal/settings"
 	"github.com/lorenzocorallo/megadw/internal/store"
 )
@@ -64,7 +66,19 @@ func Open(ctx context.Context, config Config) (*App, error) {
 		return closeWithError(fmt.Errorf("initialize settings: %w", err))
 	}
 	manager := auth.NewManager(database)
-	client := mega.NewClient(config.HTTPClient, config.MegaAPIBaseURL)
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		current, settingsErr := settingsService.Get(ctx)
+		if settingsErr != nil {
+			return closeWithError(fmt.Errorf("read network settings: %w", settingsErr))
+		}
+		httpClient = network.NewHTTPClient(network.TransportConfig{
+			ConnectTimeout:        time.Duration(current.Network.ConnectTimeoutSeconds) * time.Second,
+			ResponseHeaderTimeout: time.Duration(current.Network.ResponseHeaderTimeoutSeconds) * time.Second,
+			MaxConnectionsPerHost: current.Downloads.MaxGlobalWorkers,
+		})
+	}
+	client := mega.NewClient(httpClient, config.MegaAPIBaseURL)
 	downloadManager, err := download.NewManager(download.Config{DB: database, Secrets: secrets, Mega: client, Settings: settingsService})
 	if err != nil {
 		return closeWithError(fmt.Errorf("initialize download manager: %w", err))
@@ -82,6 +96,9 @@ func (a *App) Close() error {
 	}
 	if a.Downloads != nil {
 		_ = a.Downloads.Close()
+	}
+	if a.Mega != nil {
+		a.Mega.CloseIdleConnections()
 	}
 	return a.DB.Close()
 }

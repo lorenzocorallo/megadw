@@ -74,7 +74,7 @@ func TransitionFileState(from, to FileState) error {
 		FilePaused:      {FileDownloading: true, FileCancelled: true},
 		FileWaiting:     {FileDownloading: true, FilePaused: true, FileFailed: true, FileCancelled: true},
 		FileVerifying:   {FileMoving: true, FileFailed: true, FilePaused: true},
-		FileMoving:      {FileCompleted: true, FileFailed: true, FilePaused: true},
+		FileMoving:      {FileDownloading: true, FileCompleted: true, FileFailed: true, FilePaused: true},
 		FileCompleted:   {},
 		FileFailed:      {FileDownloading: true, FileCancelled: true},
 		FileCancelled:   {},

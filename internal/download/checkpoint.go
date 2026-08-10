@@ -52,6 +52,11 @@ func (c *CheckpointManager) Commit(ctx context.Context, checkpoint Checkpoint) e
 	if checkpoint.File == nil || checkpoint.FileID == "" {
 		return fmt.Errorf("checkpoint file and file id are required")
 	}
+	// Capture the bitmap before Sync. A parallel file scheduler may continue
+	// completing ranges while the filesystem flushes; persisting a later,
+	// unsynchronized bitmap would make restart trust data that was not part of
+	// the durability barrier.
+	bitmap := checkpoint.CompletedBitmap.Clone()
 	if err := checkpoint.File.Sync(); err != nil {
 		return fmt.Errorf("sync partial file: %w", err)
 	}
@@ -72,7 +77,7 @@ func (c *CheckpointManager) Commit(ctx context.Context, checkpoint Checkpoint) e
 	if err := c.DB.CheckpointDownloadFiles(persistCtx, []store.DownloadFileCheckpoint{
 		{
 			FileID:          checkpoint.FileID,
-			CompletedBitmap: checkpoint.CompletedBitmap.Clone(),
+			CompletedBitmap: bitmap,
 			BytesCommitted:  checkpoint.BytesCommitted,
 			State:           state,
 			UpdatedAt:       when,

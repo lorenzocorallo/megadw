@@ -68,6 +68,14 @@ func NewClient(httpClient *http.Client, apiBaseURL string) *Client {
 	return client
 }
 
+// CloseIdleConnections releases pooled transport connections owned by the
+// application during shutdown.
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 // FetchPayloadRange performs one bounded request against an already resolved
 // MEGA payload URL. Payload URLs are opaque and may contain secrets, so the
 // URL is never included in an error message or log field here.

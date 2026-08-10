@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/api"
@@ -50,8 +52,22 @@ func main() {
 	}
 
 	slog.Info("megad listening", "address", server.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("HTTP server stopped", "error", err)
-		os.Exit(1)
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	select {
+	case <-signalContext.Done():
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
+		if err := server.Shutdown(shutdownContext); err != nil {
+			slog.Error("HTTP server shutdown", "error", err)
+		}
+		cancelShutdown()
+	case err := <-serverErrors:
+		if err != nil && err != http.ErrServerClosed {
+			slog.Error("HTTP server stopped", "error", err)
+		}
 	}
 }

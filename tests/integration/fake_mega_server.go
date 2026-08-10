@@ -53,6 +53,8 @@ type FakeMegaServer struct {
 
 	commandRequests  atomic.Int64
 	payloadRequests  atomic.Int64
+	activePayload    atomic.Int64
+	maxPayloadActive atomic.Int64
 	nextPayloadToken atomic.Uint64
 	expiredURL       atomic.Bool
 
@@ -126,6 +128,20 @@ func (f *FakeMegaServer) FileKey() mega.FileKey {
 // failed requests. Metadata requests are not counted here.
 func (f *FakeMegaServer) PayloadRequestCount() int64 {
 	return f.payloadRequests.Load()
+}
+
+// MaxConcurrentPayloadRequests reports the highest number of simultaneous
+// payload handlers observed since the fixture was created or reset.
+func (f *FakeMegaServer) MaxConcurrentPayloadRequests() int64 {
+	return f.maxPayloadActive.Load()
+}
+
+// ResetPayloadMetrics clears request and concurrency counters while leaving
+// the deterministic fixture data and fault options unchanged.
+func (f *FakeMegaServer) ResetPayloadMetrics() {
+	f.payloadRequests.Store(0)
+	f.commandRequests.Store(0)
+	f.maxPayloadActive.Store(0)
 }
 
 // CommandRequestCount reports requests received by the fake /cs endpoint.
@@ -272,6 +288,14 @@ func rawFileKey(contentKey [16]byte, nonce [8]byte, metaMAC [8]byte) []byte {
 
 func (f *FakeMegaServer) servePayload(w http.ResponseWriter, r *http.Request) {
 	f.payloadRequests.Add(1)
+	active := f.activePayload.Add(1)
+	for {
+		current := f.maxPayloadActive.Load()
+		if active <= current || f.maxPayloadActive.CompareAndSwap(current, active) {
+			break
+		}
+	}
+	defer f.activePayload.Add(-1)
 	options := f.getOptions()
 	if options.Delay > 0 {
 		time.Sleep(options.Delay)

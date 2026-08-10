@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/mega"
 )
@@ -56,6 +58,25 @@ func TestRangeWorkerRejectsMalformedContentRange(t *testing.T) {
 	_, err := worker.DownloadRange(context.Background(), byteWriterAt{data: make([]byte, 2)}, testWorkerKey(), server.URL, Segment{Start: 0, End: 1}, 2)
 	if err == nil {
 		t.Fatal("malformed Content-Range was accepted")
+	}
+}
+
+func TestRangeWorkerReadIdleTimeoutClosesStalledBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Range", "bytes 0-0/1")
+		writer.WriteHeader(http.StatusPartialContent)
+		writer.(http.Flusher).Flush()
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	worker := NewRangeWorker(HTTPPayloadFetcher{Client: server.Client()})
+	started := time.Now()
+	_, err := worker.DownloadRangeWithOptions(context.Background(), byteWriterAt{data: make([]byte, 1)}, testWorkerKey(), server.URL, Segment{Start: 0, End: 0}, 1, TransferOptions{ReadIdleTimeout: 20 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "read idle timeout") {
+		t.Fatalf("stalled read error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled read cancellation took %s", elapsed)
 	}
 }
 

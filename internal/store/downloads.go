@@ -347,6 +347,29 @@ func (d *DB) UpdateDownloadFileState(ctx context.Context, update DownloadFileSta
 	return nil
 }
 
+// PrepareDownloadFileMove durably records the resolved rename target before
+// the atomic rename. If the process stops after rename but before completion
+// persistence, restart recovery can verify that exact target instead of
+// creating a new empty partial file or guessing a conflict suffix.
+func (d *DB) PrepareDownloadFileMove(ctx context.Context, fileID, finalRelativePath string, when time.Time) error {
+	when = when.UTC()
+	if when.IsZero() {
+		when = time.Now().UTC()
+	}
+	result, err := d.ExecContext(ctx, `UPDATE download_files
+		SET final_relative_path = ?, state = 'moving', updated_at = ?
+		WHERE id = ?`, finalRelativePath, when.Format(time.RFC3339Nano), fileID)
+	if err != nil {
+		return fmt.Errorf("prepare download file move %q: %w", fileID, err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check prepared download file move %q: %w", fileID, err)
+	} else if affected != 1 {
+		return fmt.Errorf("download file %q: %w", fileID, ErrNotFound)
+	}
+	return nil
+}
+
 // CompleteDownloadFile records the actual final path only after the atomic
 // rename has succeeded.
 func (d *DB) CompleteDownloadFile(ctx context.Context, fileID, finalRelativePath string, when time.Time) error {
@@ -406,9 +429,9 @@ func (d *DB) MarkDownloadsForRecovery(ctx context.Context, when time.Time) error
 			return fmt.Errorf("mark download jobs for recovery: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE download_files
-            SET state = 'paused', updated_at = ?
-            WHERE state IN ('downloading', 'verifying', 'moving')
-              AND job_id IN (SELECT id FROM download_jobs WHERE state = 'paused_recovery')`, when.Format(time.RFC3339Nano)); err != nil {
+	            SET state = 'paused', updated_at = ?
+	            WHERE state IN ('downloading', 'verifying')
+	              AND job_id IN (SELECT id FROM download_jobs WHERE state = 'paused_recovery')`, when.Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("mark download files for recovery: %w", err)
 		}
 		return nil

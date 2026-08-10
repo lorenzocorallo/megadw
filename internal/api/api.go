@@ -89,6 +89,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/downloads", s.withAuth(s.handleCreateDownload))
 	mux.HandleFunc("GET /api/v1/downloads", s.withAuth(s.handleListDownloads))
 	mux.HandleFunc("GET /api/v1/downloads/{id}", s.withAuth(s.handleGetDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/pause", s.withAuth(s.handlePauseDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/resume", s.withAuth(s.handleResumeDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/cancel", s.withAuth(s.handleCancelDownload))
+	mux.HandleFunc("POST /api/v1/queue/pause", s.withAuth(s.handlePauseQueue))
+	mux.HandleFunc("POST /api/v1/queue/resume", s.withAuth(s.handleResumeQueue))
 
 	return sameOrigin(mux)
 }
@@ -486,6 +491,81 @@ func (s *Server) handleGetDownload(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, record)
+}
+
+func (s *Server) handlePauseDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	if err := s.downloads.PauseJob(request.Context(), request.PathValue("id")); err != nil {
+		writeError(writer, http.StatusBadRequest, "download_pause_failed", err.Error(), nil)
+		return
+	}
+	s.writeDownloadActionResult(writer, request)
+}
+
+func (s *Server) handleResumeDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	if err := s.downloads.ResumeJob(request.Context(), request.PathValue("id")); err != nil {
+		writeError(writer, http.StatusBadRequest, "download_resume_failed", err.Error(), nil)
+		return
+	}
+	s.writeDownloadActionResult(writer, request)
+}
+
+type cancelDownloadRequest struct {
+	DeletePartialFiles bool `json:"deletePartialFiles"`
+}
+
+func (s *Server) handleCancelDownload(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	var input cancelDownloadRequest
+	if !decodeJSON(writer, request, &input, maxJSONBody) {
+		return
+	}
+	if err := s.downloads.CancelJob(request.Context(), request.PathValue("id"), input.DeletePartialFiles); err != nil {
+		writeError(writer, http.StatusBadRequest, "download_cancel_failed", err.Error(), nil)
+		return
+	}
+	s.writeDownloadActionResult(writer, request)
+}
+
+func (s *Server) writeDownloadActionResult(writer http.ResponseWriter, request *http.Request) {
+	if s.config.DB == nil {
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "download storage is unavailable", nil)
+		return
+	}
+	record, err := s.config.DB.GetDownloadJob(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "database_error", "could not read download after action", nil)
+		return
+	}
+	writeJSON(writer, http.StatusOK, record)
+}
+
+func (s *Server) handlePauseQueue(writer http.ResponseWriter, _ *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	s.downloads.PauseQueue()
+	writeJSON(writer, http.StatusOK, map[string]bool{"paused": true})
+}
+
+func (s *Server) handleResumeQueue(writer http.ResponseWriter, _ *http.Request, _ auth.Principal) {
+	if s.downloads == nil {
+		writeError(writer, http.StatusServiceUnavailable, "download_manager_unavailable", "download manager is unavailable", nil)
+		return
+	}
+	s.downloads.ResumeQueue()
+	writeJSON(writer, http.StatusOK, map[string]bool{"paused": false})
 }
 
 func randomID() string {

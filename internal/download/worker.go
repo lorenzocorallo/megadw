@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/mega"
 )
@@ -29,6 +31,17 @@ type RangeWorker struct {
 	Buffers sync.Pool
 }
 
+// TransferOptions contains the bounded, per-read instrumentation owned by a
+// scheduler. It does not change the protocol or the plaintext writer contract.
+type TransferOptions struct {
+	// Limiter is normally the per-job bucket. GlobalLimiter is applied in
+	// addition to it when both process-wide and per-job limits are configured.
+	Limiter         *BandwidthLimiter
+	GlobalLimiter   *BandwidthLimiter
+	Meter           *SpeedMeter
+	ReadIdleTimeout time.Duration
+}
+
 func NewRangeWorker(fetcher PayloadFetcher) *RangeWorker {
 	worker := &RangeWorker{Fetcher: fetcher}
 	worker.Buffers.New = func() any { return make([]byte, transferBufferSize) }
@@ -39,6 +52,15 @@ func NewRangeWorker(fetcher PayloadFetcher) *RangeWorker {
 func (w *RangeWorker) DownloadRange(ctx context.Context, writer interface {
 	WriteAt([]byte, int64) (int, error)
 }, key mega.FileKey, payloadURL string, segment Segment, fileSize int64) (int64, error) {
+	return w.DownloadRangeWithOptions(ctx, writer, key, payloadURL, segment, fileSize, TransferOptions{})
+}
+
+// DownloadRangeWithOptions is the scheduler-facing range operation. The
+// limiter is applied after each bounded network read and the meter records
+// only bytes that were successfully read and decrypted/written.
+func (w *RangeWorker) DownloadRangeWithOptions(ctx context.Context, writer interface {
+	WriteAt([]byte, int64) (int, error)
+}, key mega.FileKey, payloadURL string, segment Segment, fileSize int64, options TransferOptions) (int64, error) {
 	if w == nil || w.Fetcher == nil {
 		return 0, fmt.Errorf("payload fetcher is unavailable")
 	}
@@ -51,6 +73,9 @@ func (w *RangeWorker) DownloadRange(ctx context.Context, writer interface {
 	}
 	if response == nil || response.Body == nil {
 		return 0, fmt.Errorf("payload fetcher returned no response body")
+	}
+	if options.ReadIdleTimeout > 0 {
+		response.Body = newReadIdleBody(response.Body, options.ReadIdleTimeout)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusPartialContent {
@@ -76,6 +101,16 @@ func (w *RangeWorker) DownloadRange(ctx context.Context, writer interface {
 		if remaining := want - written; remaining < readSize {
 			readSize = remaining
 		}
+		if options.Limiter != nil {
+			if err := options.Limiter.WaitN(ctx, readSize); err != nil {
+				return written, err
+			}
+		}
+		if options.GlobalLimiter != nil {
+			if err := options.GlobalLimiter.WaitN(ctx, readSize); err != nil {
+				return written, err
+			}
+		}
 		n, readErr := io.ReadAtLeast(limited, buffer[:readSize], 1)
 		if n > 0 {
 			stream.XORKeyStream(buffer[:n], buffer[:n])
@@ -83,6 +118,9 @@ func (w *RangeWorker) DownloadRange(ctx context.Context, writer interface {
 				return written, err
 			}
 			written += int64(n)
+			if options.Meter != nil {
+				options.Meter.Add(int64(n))
+			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
@@ -100,6 +138,59 @@ func (w *RangeWorker) DownloadRange(ctx context.Context, writer interface {
 		return written, fmt.Errorf("validate payload length: %w", readErr)
 	}
 	return written, nil
+}
+
+type readIdleBody struct {
+	source    io.ReadCloser
+	timeout   time.Duration
+	timerMu   sync.Mutex
+	timer     *time.Timer
+	closeOnce sync.Once
+	timedOut  atomic.Bool
+}
+
+func newReadIdleBody(source io.ReadCloser, timeout time.Duration) *readIdleBody {
+	body := &readIdleBody{source: source, timeout: timeout}
+	body.resetTimer()
+	return body
+}
+
+func (b *readIdleBody) Read(buffer []byte) (int, error) {
+	b.resetTimer()
+	n, err := b.source.Read(buffer)
+	if n > 0 {
+		b.resetTimer()
+	}
+	if b.timedOut.Load() {
+		return n, fmt.Errorf("payload read idle timeout after %s", b.timeout)
+	}
+	return n, err
+}
+
+func (b *readIdleBody) Close() error {
+	b.timerMu.Lock()
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.timerMu.Unlock()
+	var err error
+	b.closeOnce.Do(func() { err = b.source.Close() })
+	return err
+}
+
+func (b *readIdleBody) resetTimer() {
+	b.timerMu.Lock()
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.timeout, b.expire)
+	} else {
+		b.timer.Reset(b.timeout)
+	}
+	b.timerMu.Unlock()
+}
+
+func (b *readIdleBody) expire() {
+	b.timedOut.Store(true)
+	b.closeOnce.Do(func() { _ = b.source.Close() })
 }
 
 // DownloadSegment is the descriptive alias used by scheduler-facing callers.

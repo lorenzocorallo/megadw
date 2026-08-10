@@ -1,6 +1,6 @@
 # MEGA Downloader
 
-MEGA Downloader is a single-process Go application with a client-rendered React web interface. The repository is being implemented phase by phase from [PLAN.md](PLAN.md); the current tree contains the Phase D persistence-backed single-worker transfer core on top of the Phase C authentication, settings, filesystem confinement, and Phase B public-link protocol surface.
+MEGA Downloader is a single-process Go application with a client-rendered React web interface. The repository is being implemented phase by phase from [PLAN.md](PLAN.md); the current tree contains the Phase E persistence-backed parallel transfer scheduler on top of the Phase C authentication, settings, filesystem confinement, and Phase B public-link protocol surface.
 
 ## Toolchain
 

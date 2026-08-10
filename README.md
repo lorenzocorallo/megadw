@@ -1,4 +1,4 @@
-# MEGA Downloader
+# MEGA Downloader (`megad`)
 
 MEGA Downloader is a single-process Go application with a client-rendered
 React web interface for resumable public MEGA file and folder downloads. The
@@ -11,6 +11,40 @@ file, checkpoints file data before its resume bitmap, verifies MEGA integrity,
 and atomically renames completed files onto the same filesystem. HTTP 509 and
 other quota responses pause the selected job and never rotate accounts or
 proxies.
+
+> [!WARNING]
+> This project is experimental and has been developed with substantial AI
+> assistance. It has not received a complete independent security or
+> reliability audit. Expect bugs and breaking changes, keep backups, grant the
+> service only the filesystem access it needs, and do not expose it directly
+> to the public internet.
+
+## Why `megad`?
+
+- One self-contained production process serves both the API and web UI; Node.js
+  and Java remain build-time tools only.
+- Restart-safe transfers checkpoint file data before their compact SQLite
+  resume bitmaps.
+- Parallel ranges write directly into one sparse partial file, avoiding chunk
+  files and a second full-size merge copy.
+- MEGA integrity verification completes before the same-filesystem atomic move
+  into the final root.
+- Worker counts, buffers, retries, events, file descriptors, and bandwidth are
+  explicitly bounded for small servers.
+- Quota handling pauses and resumes the selected account/proxy context; it does
+  not rotate identities to evade transfer limits.
+
+The downloader supports public file and folder links, optional standard MEGA
+accounts without MFA/2FA, and explicit HTTP, HTTPS CONNECT, and SOCKS5 proxy
+profiles. Account authentication is project-owned and bounded: it acquires or
+validates a session without loading the private cloud tree or starting an
+event-polling client. MFA/2FA account login, uploads, streaming, cloud browsing,
+and automatic quota-evasion features are outside the current MVP.
+
+Implementation and release gates live in [PLAN.md](PLAN.md). Upload and
+streaming remain deferred in
+[PLAN-UPLOAD.md](.docs/plans/PLAN-UPLOAD.md) and
+[PLAN-STREAMING.md](.docs/plans/PLAN-STREAMING.md).
 
 ## Build and verify
 
@@ -236,10 +270,14 @@ effectively equivalent throughput with materially lower resource use.
 
 ## Security and release hygiene
 
-Application secrets are AES-256-GCM encrypted at rest; session tokens are only
-stored as SHA-256 digests. Public-link fragments, passwords, proxy passwords,
-and session material are redacted from normal logs. Browser-supplied paths are
-relative and root-confined; existing symlinks in controlled paths are rejected.
+MEGA credentials and sessions, public-link keys, and proxy passwords are
+AES-256-GCM encrypted at rest. Local administrator session tokens are stored
+only as SHA-256 digests. Secret material is redacted from normal logs.
+Browser-supplied paths are relative and root-confined; existing symlinks in
+controlled paths are rejected.
+Configured roots are held as directory capabilities, and nested opens,
+deletion, verification, and finalization use descriptor-relative Linux
+operations so parent-path replacement cannot redirect work outside them.
 
 `THIRD_PARTY_NOTICES.md` lists direct runtime/build dependencies.
 `scripts/license-audit.sh` checks the pinned Go and npm dependency metadata,

@@ -26,6 +26,16 @@ func TestParseModernPublicLinks(t *testing.T) {
 				SelectedNode: "nested01",
 			},
 		},
+		{
+			name: "folder with selected folder",
+			raw:  "https://mega.nz/folder/folder01#AQIDBAUGBwgJCgsMDQ4PEA/folder/nested01",
+			want: PublicLink{
+				Kind:         LinkKindFolder,
+				Handle:       "folder01",
+				Key:          "AQIDBAUGBwgJCgsMDQ4PEA",
+				SelectedNode: "nested01",
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -68,6 +78,8 @@ func TestParseLinkRejectsUnsafeOrUnsupportedURLs(t *testing.T) {
 		"https://mega.nz:443/file/file0001#key",
 		"https://mega.nz/file/file0001#bad!key",
 		"https://mega.nz/file/file0001#key/file/other",
+		"https://mega.nz/folder/folder01#key/not-a-selection/node",
+		"https://mega.nz/folder/folder01#key/file/node/extra",
 		"https://mega.nz/file/file0001#",
 	} {
 		_, err := ParseLink(raw)

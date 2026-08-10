@@ -29,3 +29,25 @@ func TestNewHTTPClientBoundsConnectionsWithoutTotalRequestTimeout(t *testing.T) 
 		t.Fatal("direct transport unexpectedly uses an environment proxy")
 	}
 }
+
+func TestProxyProfileTimeoutControlsProxyConnectionAndTLSHandshake(t *testing.T) {
+	client, err := NewClientForProxy(TransportConfig{
+		ConnectTimeout:        15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxConnectionsPerHost: 8,
+	}, ProxyProfile{
+		ID:      "proxy-timeout",
+		Type:    ProxyHTTPS,
+		Host:    "proxy.example.test",
+		Port:    8443,
+		Timeout: 3 * time.Second,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := client.Transport.(*http.Transport)
+	if transport.TLSHandshakeTimeout != 3*time.Second {
+		t.Fatalf("TLS handshake timeout = %s, want 3s", transport.TLSHandshakeTimeout)
+	}
+}

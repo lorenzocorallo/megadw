@@ -101,12 +101,12 @@ func newHTTPClient(config TransportConfig, timeout time.Duration) *http.Client {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.DialContext = (&net.Dialer{Timeout: config.ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.DialContext = (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext
 	transport.MaxIdleConns = config.MaxConnectionsPerHost * 2
 	transport.MaxIdleConnsPerHost = config.MaxConnectionsPerHost
 	transport.MaxConnsPerHost = config.MaxConnectionsPerHost
 	transport.IdleConnTimeout = 90 * time.Second
-	transport.TLSHandshakeTimeout = config.ConnectTimeout
+	transport.TLSHandshakeTimeout = timeout
 	transport.ResponseHeaderTimeout = config.ResponseHeaderTimeout
 	transport.ExpectContinueTimeout = time.Second
 	return &http.Client{Transport: transport, Timeout: 0}

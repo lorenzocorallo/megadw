@@ -31,6 +31,7 @@ const (
 	maxResolveBody  = 256 << 10
 	maxSetupBody    = 256 << 10
 	maxSettingsBody = 256 << 10
+	sseWriteTimeout = 10 * time.Second
 )
 
 type Config struct {
@@ -46,17 +47,19 @@ type Config struct {
 	Commit        string
 	BuildTime     string
 	SecureCookies bool
+	AllowedHosts  []string
 	Now           func() time.Time
 }
 
 type Server struct {
-	config     Config
-	auth       *auth.Manager
-	settings   *settings.Service
-	mega       *mega.Client
-	downloads  *download.Manager
-	transports *network.TransportPool
-	events     *events.Bus
+	config       Config
+	auth         *auth.Manager
+	settings     *settings.Service
+	mega         *mega.Client
+	downloads    *download.Manager
+	transports   *network.TransportPool
+	events       *events.Bus
+	allowedHosts map[string]struct{}
 }
 
 func New(config Config) http.Handler {
@@ -88,7 +91,13 @@ func NewServer(config Config) *Server {
 	if config.Events == nil {
 		config.Events = events.NewBus()
 	}
-	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads, transports: config.Transports, events: config.Events}
+	allowedHosts := make(map[string]struct{}, len(config.AllowedHosts))
+	for _, host := range config.AllowedHosts {
+		if normalized := normalizeHost(host); normalized != "" {
+			allowedHosts[normalized] = struct{}{}
+		}
+	}
+	return &Server{config: config, auth: config.Auth, settings: config.Settings, mega: config.Mega, downloads: config.Downloads, transports: config.Transports, events: config.Events, allowedHosts: allowedHosts}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -132,7 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.withAuth(s.handleDeleteProxy))
 	mux.HandleFunc("GET /api/v1/events", s.withAuth(s.handleEvents))
 
-	return sameOrigin(mux)
+	return sameOrigin(s.allowedHosts, mux)
 }
 
 func (s *Server) withAuth(handler func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc {
@@ -581,7 +590,10 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request, _ a
 	writeJSON(w, 200, record)
 }
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	if err := s.config.DB.DeleteMegaAccount(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.config.DB.DeleteMegaAccount(r.Context(), r.PathValue("id")); errors.Is(err, store.ErrRecordInUse) {
+		writeError(w, http.StatusConflict, "account_in_use", "account is selected by a persisted download", nil)
+		return
+	} else if err != nil {
 		writeError(w, 404, "account_not_found", "account was not found", nil)
 		return
 	}
@@ -730,7 +742,10 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, _ aut
 }
 func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
 	id := r.PathValue("id")
-	if err := s.config.DB.DeleteProxyProfile(r.Context(), id); err != nil {
+	if err := s.config.DB.DeleteProxyProfile(r.Context(), id); errors.Is(err, store.ErrRecordInUse) {
+		writeError(w, http.StatusConflict, "proxy_in_use", "proxy is selected by a persisted download", nil)
+		return
+	} else if err != nil {
 		writeError(w, 404, "proxy_not_found", "proxy was not found", nil)
 		return
 	}
@@ -1110,7 +1125,7 @@ func (s *Server) handleResumeQueue(writer http.ResponseWriter, _ *http.Request, 
 }
 
 func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
-	flusher, ok := writer.(http.Flusher)
+	_, ok := writer.(http.Flusher)
 	if !ok {
 		writeError(writer, http.StatusInternalServerError, "sse_unavailable", "the server does not support event streaming", nil)
 		return
@@ -1119,12 +1134,30 @@ func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request,
 	writer.Header().Set("Cache-Control", "no-cache, no-store")
 	writer.Header().Set("Connection", "keep-alive")
 	writer.Header().Set("X-Accel-Buffering", "no")
-	if _, err := io.WriteString(writer, ": connected\n\n"); err != nil {
-		return
+	controller := http.NewResponseController(writer)
+	writeEvent := func(payload string) error {
+		// A disconnected or non-reading peer must not retain an SSE handler and
+		// its socket forever. The server-wide WriteTimeout is intentionally zero
+		// for streams, so bound each individual write instead.
+		if err := controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		if _, err := io.WriteString(writer, payload); err != nil {
+			return err
+		}
+		if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		return nil
 	}
-	flusher.Flush()
 	subscription := s.events.Subscribe(request.Context())
 	defer subscription.Close()
+	// Register before flushing the prelude. Once a client observes the
+	// connected marker, every subsequently published event must have a live
+	// subscriber rather than falling into a pre-subscription race window.
+	if err := writeEvent(": connected\n\n"); err != nil {
+		return
+	}
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
 	for {
@@ -1141,15 +1174,13 @@ func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request,
 			if err != nil {
 				continue
 			}
-			if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event.Name, payload); err != nil {
+			if err := writeEvent(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Name, payload)); err != nil {
 				return
 			}
-			flusher.Flush()
 		case <-keepAlive.C:
-			if _, err := io.WriteString(writer, ": keep-alive\n\n"); err != nil {
+			if err := writeEvent(": keep-alive\n\n"); err != nil {
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }
@@ -1231,16 +1262,31 @@ func writeError(writer http.ResponseWriter, status int, code, message string, de
 	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"code": code, "message": message, "details": details}})
 }
 
-func sameOrigin(next http.Handler) http.Handler {
+func sameOrigin(allowedHosts map[string]struct{}, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPost || request.Method == http.MethodPut || request.Method == http.MethodPatch || request.Method == http.MethodDelete {
-			if !requestHasSameOrigin(request) {
+			if !requestHostAllowed(request, allowedHosts) || !requestHasSameOrigin(request) {
 				writeError(writer, http.StatusForbidden, "origin_forbidden", "request origin is not allowed", nil)
 				return
 			}
 		}
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func requestHostAllowed(request *http.Request, allowedHosts map[string]struct{}) bool {
+	if len(allowedHosts) == 0 {
+		return request != nil && request.Host != ""
+	}
+	if request == nil {
+		return false
+	}
+	_, ok := allowedHosts[normalizeHost(request.Host)]
+	return ok
+}
+
+func normalizeHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 }
 
 func requestHasSameOrigin(request *http.Request) bool {

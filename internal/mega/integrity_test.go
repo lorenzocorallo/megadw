@@ -25,6 +25,17 @@ func TestIntegrityVector(t *testing.T) {
 	}
 }
 
+func TestEmptyFileIntegrityStillAuthenticatesMetaMAC(t *testing.T) {
+	key := FileKey{}
+	if err := VerifyIntegrity(bytes.NewReader(nil), 0, key); err != nil {
+		t.Fatalf("empty integrity error = %v", err)
+	}
+	key.MetaMAC[0] = 1
+	if err := VerifyIntegrity(bytes.NewReader(nil), 0, key); err != ErrIntegrityMismatch {
+		t.Fatalf("empty integrity error = %v, want ErrIntegrityMismatch", err)
+	}
+}
+
 func integrityTestPlaintext() []byte {
 	plain := make([]byte, 5_000_123)
 	for index := range plain {

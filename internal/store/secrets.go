@@ -85,6 +85,22 @@ func OpenSecretStore(path string) (*SecretStore, error) {
 	if err := file.Close(); err != nil {
 		return nil, fmt.Errorf("close application secret: %w", err)
 	}
+	// Sync the directory entry after the key contents. Without this second
+	// barrier, a power loss can preserve the database while losing the newly
+	// created key name, making every encrypted source/account/proxy secret
+	// permanently unreadable on restart.
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("open application secret directory: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return nil, fmt.Errorf("sync application secret directory: %w", syncErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close application secret directory: %w", closeErr)
+	}
 	return NewSecretStore(key[:])
 }
 

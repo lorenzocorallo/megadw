@@ -80,14 +80,14 @@ func ParseLink(rawURL string) (PublicLink, error) {
 			if kind != LinkKindFolder {
 				return PublicLink{}, fmt.Errorf("%w: file links cannot select a folder path", ErrInvalidLink)
 			}
-			if strings.HasPrefix(tail, "file/") {
-				link.SelectedNode = strings.TrimPrefix(tail, "file/")
-				if err := validateLinkToken(link.SelectedNode, "selected node"); err != nil {
-					return PublicLink{}, err
-				}
-			} else {
-				link.SelectedPath = tail
+			selectionKind, selectedNode, selected := strings.Cut(tail, "/")
+			if !selected || (selectionKind != "file" && selectionKind != "folder") {
+				return PublicLink{}, fmt.Errorf("%w: invalid folder-link selection", ErrInvalidLink)
 			}
+			if err := validateLinkToken(selectedNode, "selected node"); err != nil {
+				return PublicLink{}, err
+			}
+			link.SelectedNode = selectedNode
 		}
 		return link, nil
 	}

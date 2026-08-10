@@ -67,6 +67,28 @@ func TestPublicFolderFixtureResolvesRecursively(t *testing.T) {
 	}
 }
 
+func TestPublicFolderSelectedNodeResolvesOnlySelectedSubtree(t *testing.T) {
+	fixture := NewFakeMegaServer()
+	defer fixture.Close()
+	client := mega.NewClient(fixture.HTTPClient(), fixture.APIBaseURL())
+
+	selectedFile, err := client.ResolveLink(context.Background(), fixture.FolderLink()+"/file/"+fakeFileHandle, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedFile.DisplayName != "fixture.txt" || len(selectedFile.Files) != 1 || selectedFile.Files[0].RelativePath != "fixture.txt" {
+		t.Fatalf("selected file resolution = %#v", selectedFile)
+	}
+
+	selectedFolder, err := client.ResolveLink(context.Background(), fixture.FolderLink()+"/folder/"+fakeNestedHandle, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedFolder.DisplayName != "Nested folder" || len(selectedFolder.Files) != 1 || selectedFolder.Files[0].RelativePath != "Nested folder/fixture.txt" {
+		t.Fatalf("selected folder resolution = %#v", selectedFolder)
+	}
+}
+
 func TestRangedEncryptedFixtureDecryptsAtAlignedAndUnalignedOffsets(t *testing.T) {
 	fixture := NewFakeMegaServer()
 	defer fixture.Close()

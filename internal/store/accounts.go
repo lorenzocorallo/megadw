@@ -161,15 +161,23 @@ func (d *DB) MarkMegaAccountChecked(ctx context.Context, id, status string, now 
 	return nil
 }
 func (d *DB) DeleteMegaAccount(ctx context.Context, id string) error {
-	r, err := d.ExecContext(ctx, `DELETE FROM mega_accounts WHERE id=?`, id)
-	if err != nil {
-		return err
-	}
-	n, _ := r.RowsAffected()
-	if n != 1 {
-		return ErrNotFound
-	}
-	return nil
+	return d.WithTx(ctx, func(tx *sql.Tx) error {
+		var references int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM download_jobs WHERE account_id=?`, id).Scan(&references); err != nil {
+			return err
+		}
+		if references != 0 {
+			return ErrRecordInUse
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM mega_accounts WHERE id=?`, id)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 func boolInt(v bool) int {
 	if v {

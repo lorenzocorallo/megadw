@@ -25,12 +25,13 @@ const (
 )
 
 type Config struct {
-	StateDir       string
-	DatabasePath   string
-	SecretKeyPath  string
-	MegaAPIBaseURL string
-	HTTPClient     *http.Client
-	Version        string
+	StateDir           string
+	DatabasePath       string
+	SecretKeyPath      string
+	MegaAPIBaseURL     string
+	HTTPClient         *http.Client
+	Version            string
+	DeferDownloadStart bool
 }
 
 type App struct {
@@ -93,10 +94,12 @@ func Open(ctx context.Context, config Config) (*App, error) {
 		eventBus.Close()
 		return closeWithError(fmt.Errorf("initialize download manager: %w", err))
 	}
-	if err := downloadManager.Start(ctx); err != nil {
-		_ = downloadManager.Close()
-		eventBus.Close()
-		return closeWithError(fmt.Errorf("start download manager: %w", err))
+	if !config.DeferDownloadStart {
+		if err := downloadManager.Start(ctx); err != nil {
+			_ = downloadManager.Close()
+			eventBus.Close()
+			return closeWithError(fmt.Errorf("start download manager: %w", err))
+		}
 	}
 	return &App{DB: database, Secrets: secrets, Settings: settingsService, Auth: manager, Mega: client, Downloads: downloadManager, Transports: transports, Events: eventBus}, nil
 }

@@ -260,11 +260,21 @@ func (c *Client) resolveFolder(ctx context.Context, link PublicLink) (ResolvedJo
 	if rootNode := byHandle[rootHandle]; rootNode != nil && rootNode.Name != "" {
 		rootName = rootNode.Name
 	}
+	selectedRoot := byHandle[link.SelectedNode]
+	if link.SelectedNode != "" {
+		if selectedRoot == nil {
+			return ResolvedJob{}, fmt.Errorf("%w: selected folder node %q is missing", ErrInvalidLink, link.SelectedNode)
+		}
+		rootName = selectedRoot.Name
+	}
 	files := make([]ResolvedFile, 0)
 	var total int64
 	for index := range nodes {
 		node := &nodes[index]
 		if node.Kind != 0 {
+			continue
+		}
+		if selectedRoot != nil && !nodeIsWithinSelection(node, selectedRoot, byHandle) {
 			continue
 		}
 		if node.Size < 0 {
@@ -273,7 +283,7 @@ func (c *Client) resolveFolder(ctx context.Context, link PublicLink) (ResolvedJo
 		if total > math.MaxInt64-node.Size {
 			return ResolvedJob{}, fmt.Errorf("%w: folder size overflows int64", ErrInvalidLink)
 		}
-		relativePath, err := folderNodePath(node, byHandle)
+		relativePath, err := folderNodePathFrom(node, byHandle, selectedRoot)
 		if err != nil {
 			return ResolvedJob{}, err
 		}
@@ -486,7 +496,14 @@ func (c *Client) command(ctx context.Context, payload []map[string]any, folderHa
 	request.Header.Set("Accept", "application/json")
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("MEGA API request: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// net/http transport errors can include the complete request URL. An
+		// authenticated command URL carries the account session in its query,
+		// so never propagate the raw transport error into logs or persisted job
+		// diagnostics.
+		return nil, fmt.Errorf("MEGA API request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -520,8 +537,15 @@ type folderNode struct {
 }
 
 func folderNodePath(node *folderNode, byHandle map[string]*folderNode) (string, error) {
+	return folderNodePathFrom(node, byHandle, nil)
+}
+
+func folderNodePathFrom(node *folderNode, byHandle map[string]*folderNode, selectedRoot *folderNode) (string, error) {
 	parts := []string{node.Name}
 	seen := map[string]bool{node.Handle: true}
+	if selectedRoot != nil && node.Handle == selectedRoot.Handle {
+		return node.Name, nil
+	}
 	parent := node.Parent
 	for parent != "" {
 		if seen[parent] {
@@ -533,12 +557,35 @@ func folderNodePath(node *folderNode, byHandle map[string]*folderNode) (string, 
 			return "", fmt.Errorf("%w: missing parent %q for node %q", ErrInvalidLink, parent, node.Handle)
 		}
 		parts = append(parts, parentNode.Name)
+		if selectedRoot != nil && parentNode.Handle == selectedRoot.Handle {
+			break
+		}
 		parent = parentNode.Parent
 	}
 	for left, right := 0, len(parts)-1; left < right; left, right = left+1, right-1 {
 		parts[left], parts[right] = parts[right], parts[left]
 	}
 	return strings.Join(parts, "/"), nil
+}
+
+func nodeIsWithinSelection(node, selected *folderNode, byHandle map[string]*folderNode) bool {
+	if node == nil || selected == nil {
+		return false
+	}
+	seen := make(map[string]struct{})
+	for current := node; current != nil; current = byHandle[current.Parent] {
+		if current.Handle == selected.Handle {
+			return true
+		}
+		if _, duplicate := seen[current.Handle]; duplicate {
+			return false
+		}
+		seen[current.Handle] = struct{}{}
+		if current.Parent == "" {
+			return false
+		}
+	}
+	return false
 }
 
 func extractNodeKey(value any, ownerHandle string) string {

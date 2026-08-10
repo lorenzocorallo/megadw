@@ -105,6 +105,18 @@ type jobResult struct {
 	err   error
 }
 
+type quotaTimer struct {
+	timer *time.Timer
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (t *quotaTimer) finish() {
+	if t != nil {
+		t.once.Do(func() { close(t.done) })
+	}
+}
+
 // Manager owns the bounded priority queue, file slots, and global network
 // worker semaphore. At most maxActiveFiles job goroutines are owned by the
 // queue dispatcher, and each job has at most maxActiveFiles file workers.
@@ -162,7 +174,8 @@ type Manager struct {
 	speeds     map[string]*SpeedMeter
 	speedOrder []string
 
-	quotaTimers map[string]*time.Timer
+	quotaTimers map[string]*quotaTimer
+	quotaAll    map[*quotaTimer]struct{}
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -293,7 +306,8 @@ func NewManager(config Config) (*Manager, error) {
 		pendingSeq:         make(map[string]uint64),
 		queuePausedIDs:     make(map[string]struct{}),
 		speeds:             make(map[string]*SpeedMeter),
-		quotaTimers:        make(map[string]*time.Timer),
+		quotaTimers:        make(map[string]*quotaTimer),
+		quotaAll:           make(map[*quotaTimer]struct{}),
 	}
 	heap.Init(&manager.queue)
 	return manager, nil
@@ -633,20 +647,32 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 		cancel()
 	}
 	m.mu.Lock()
-	for id, timer := range m.quotaTimers {
-		timer.Stop()
-		delete(m.quotaTimers, id)
+	quotaTimers := make([]*quotaTimer, 0, len(m.quotaAll))
+	for timer := range m.quotaAll {
+		if timer.timer.Stop() {
+			timer.finish()
+		}
+		quotaTimers = append(quotaTimers, timer)
 	}
+	m.quotaTimers = make(map[string]*quotaTimer)
+	m.quotaAll = make(map[*quotaTimer]struct{})
 	m.mu.Unlock()
 	if done == nil {
 		return nil
 	}
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	for _, timer := range quotaTimers {
+		select {
+		case <-timer.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // PauseJob requests a durable pause and waits for active range workers to
@@ -657,7 +683,10 @@ func (m *Manager) PauseJob(ctx context.Context, jobID string) error {
 	}
 	m.mu.Lock()
 	if timer := m.quotaTimers[jobID]; timer != nil {
-		timer.Stop()
+		if timer.timer.Stop() {
+			timer.finish()
+			delete(m.quotaAll, timer)
+		}
 		delete(m.quotaTimers, jobID)
 	}
 	m.mu.Unlock()
@@ -720,7 +749,10 @@ func (m *Manager) ResumeJob(ctx context.Context, jobID string) error {
 	}
 	m.mu.Lock()
 	if timer := m.quotaTimers[jobID]; timer != nil {
-		timer.Stop()
+		if timer.timer.Stop() {
+			timer.finish()
+			delete(m.quotaAll, timer)
+		}
 		delete(m.quotaTimers, jobID)
 	}
 	m.mu.Unlock()
@@ -769,12 +801,28 @@ func (m *Manager) scheduleQuotaRetry(jobID string, delay time.Duration) {
 		delay = 0
 	}
 	m.mu.Lock()
-	if old := m.quotaTimers[jobID]; old != nil {
-		old.Stop()
+	if m.closed || m.ctx == nil || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return
 	}
-	timer := time.AfterFunc(delay, func() {
+	if old := m.quotaTimers[jobID]; old != nil {
+		if old.timer.Stop() {
+			old.finish()
+			delete(m.quotaAll, old)
+		}
+	}
+	timer := &quotaTimer{done: make(chan struct{})}
+	timer.timer = time.AfterFunc(delay, func() {
+		defer func() {
+			m.mu.Lock()
+			if m.quotaTimers[jobID] == timer {
+				delete(m.quotaTimers, jobID)
+			}
+			delete(m.quotaAll, timer)
+			m.mu.Unlock()
+			timer.finish()
+		}()
 		m.mu.Lock()
-		delete(m.quotaTimers, jobID)
 		closed := m.closed || m.ctx == nil || m.ctx.Err() != nil
 		m.mu.Unlock()
 		if closed {
@@ -783,6 +831,7 @@ func (m *Manager) scheduleQuotaRetry(jobID string, delay time.Duration) {
 		_ = m.ResumeJob(context.Background(), jobID)
 	})
 	m.quotaTimers[jobID] = timer
+	m.quotaAll[timer] = struct{}{}
 	m.mu.Unlock()
 }
 
@@ -824,7 +873,10 @@ func (m *Manager) CancelJob(ctx context.Context, jobID string, deletePartialFile
 	}
 	m.mu.Lock()
 	if timer := m.quotaTimers[jobID]; timer != nil {
-		timer.Stop()
+		if timer.timer.Stop() {
+			timer.finish()
+			delete(m.quotaAll, timer)
+		}
 		delete(m.quotaTimers, jobID)
 	}
 	m.mu.Unlock()
@@ -920,11 +972,14 @@ func removeCompletedFiles(job store.DownloadJobRecord) error {
 	if err != nil {
 		return err
 	}
+	if err := root.Ensure(); err != nil {
+		return err
+	}
 	for _, file := range job.Files {
 		if FileState(file.State) != FileCompleted || file.FinalRelativePath == "" {
 			continue
 		}
-		path, err := root.Join(file.FinalRelativePath)
+		path, err := root.Resolve(file.FinalRelativePath)
 		if err != nil {
 			return err
 		}
@@ -979,6 +1034,9 @@ func (m *Manager) cancelPersistedJob(jobID string, deletePartialFiles bool) erro
 func (m *Manager) removePartialDirectory(job store.DownloadJobRecord) error {
 	root, err := fsRoot(job.IncompleteRoot)
 	if err != nil {
+		return err
+	}
+	if err := root.Ensure(); err != nil {
 		return err
 	}
 	relative, err := fsroot.SanitizeComponent(job.ID)

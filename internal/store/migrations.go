@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const initialMigrationVersion = 2
+const initialMigrationVersion = 1
 
 // initialMigrationSQL is kept in the binary because megad is intentionally a
 // single self-contained executable. The checked-in SQL file is the readable

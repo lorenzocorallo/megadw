@@ -18,6 +18,7 @@ export function AddDownload() {
   const titleID = useId();
   const dialogRef = useRef<HTMLElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const currentResolveSource = useRef("");
   const [open, setOpen] = useState(false);
   const [url, setURL] = useState("");
   const [destination, setDestination] = useState("");
@@ -28,6 +29,7 @@ export function AddDownload() {
   const [message, setMessage] = useState("");
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: listAccounts, enabled: open });
   const proxies = useQuery({ queryKey: ["proxies"], queryFn: listProxies, enabled: open });
+  currentResolveSource.current = `${url}\u0000${accountId}`;
 
   useEffect(() => {
     if (!open) return;
@@ -66,8 +68,10 @@ export function AddDownload() {
   }, [open]);
 
   const resolveMutation = useMutation({
-    mutationFn: () => resolveDownload(url, accountId),
-    onSuccess: (value) => {
+    mutationFn: (source: { url: string; accountId: string; key: string }) =>
+      resolveDownload(source.url, source.accountId),
+    onSuccess: (value, source) => {
+      if (source.key !== currentResolveSource.current) return;
       setResolved(value);
       setMessage("");
     },
@@ -162,7 +166,10 @@ export function AddDownload() {
                   id="mega-url"
                   className="min-h-24 w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none ring-emerald-400 placeholder:text-slate-600 focus:ring-2"
                   value={url}
-                  onChange={(event) => setURL(event.target.value)}
+                  onChange={(event) => {
+                    setURL(event.target.value);
+                    setResolved(null);
+                  }}
                   placeholder={t("download.megaURLPlaceholder")}
                   spellCheck={false}
                   autoFocus
@@ -177,7 +184,10 @@ export function AddDownload() {
                     id="download-account"
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:ring-2 focus:ring-emerald-400"
                     value={accountId}
-                    onChange={(event) => setAccountId(event.target.value)}
+                    onChange={(event) => {
+                      setAccountId(event.target.value);
+                      setResolved(null);
+                    }}
                   >
                     <option value="">{t("download.anonymous")}</option>
                     {accounts.data?.map((account) => (
@@ -243,7 +253,13 @@ export function AddDownload() {
                 <button
                   className="rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 hover:bg-emerald-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                   type="button"
-                  onClick={() => resolveMutation.mutate()}
+                  onClick={() =>
+                    resolveMutation.mutate({
+                      url,
+                      accountId,
+                      key: `${url}\u0000${accountId}`,
+                    })
+                  }
                   disabled={!url.trim() || resolveMutation.isPending}
                 >
                   {resolveMutation.isPending ? t("download.resolving") : t("download.resolve")}

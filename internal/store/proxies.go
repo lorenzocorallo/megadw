@@ -133,13 +133,21 @@ func (d *DB) UpdateProxyProfile(ctx context.Context, id string, in ProxyProfileI
 	})
 }
 func (d *DB) DeleteProxyProfile(ctx context.Context, id string) error {
-	r, e := d.ExecContext(ctx, `DELETE FROM proxy_profiles WHERE id=?`, id)
-	if e != nil {
-		return e
-	}
-	n, _ := r.RowsAffected()
-	if n != 1 {
-		return ErrNotFound
-	}
-	return nil
+	return d.WithTx(ctx, func(tx *sql.Tx) error {
+		var references int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM download_jobs WHERE proxy_id=?`, id).Scan(&references); err != nil {
+			return err
+		}
+		if references != 0 {
+			return ErrRecordInUse
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM proxy_profiles WHERE id=?`, id)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }

@@ -98,6 +98,21 @@ test.describe("Phase G browser flows", () => {
     await expect(page.getByRole("alert")).toContainText("invalid");
   });
 
+  test("invalidates resolved metadata when the source URL changes", async ({ page }) => {
+    await installMockBackend(page);
+    await page.goto("/");
+    await openAddDialog(page, "https://mega.nz/file/valid#key");
+    await expect(page.getByTestId("resolved-download")).toBeVisible();
+    await page.getByLabel("MEGA URL").fill("https://mega.nz/file/different#key");
+    await expect(page.getByTestId("resolved-download")).toHaveCount(0);
+
+    await page.getByLabel("MEGA URL").fill("https://mega.nz/file/slow#key");
+    await page.getByRole("button", { name: "Resolve" }).click();
+    await page.getByLabel("MEGA URL").fill("https://mega.nz/file/changed-again#key");
+    await page.waitForTimeout(100);
+    await expect(page.getByTestId("resolved-download")).toHaveCount(0);
+  });
+
   test("resolves a folder and displays its file tree", async ({ page }) => {
     await installMockBackend(page);
     await page.goto("/");
@@ -419,6 +434,7 @@ async function handleMockRequest(route: Route, state: MockState) {
   if (path === "/api/v1/downloads/resolve" && method === "POST") {
     const urlValue = textValue(body, "url");
     if (!urlValue.includes("mega.nz")) return fail("invalid MEGA link");
+    if (urlValue.includes("/slow#")) await new Promise((resolve) => setTimeout(resolve, 50));
     if (urlValue.includes("folder")) {
       return ok({
         kind: "folder",

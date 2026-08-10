@@ -75,6 +75,13 @@ create the local administrator. The default state and download paths are:
 For an unprivileged local run, set `-state-dir`, `-database`, and
 `-secret-key` to writable paths. `MEGAD_LISTEN`, `MEGAD_STATE_DIR`,
 `MEGAD_DATABASE`, and `MEGAD_SECRET_KEY` are equivalent environment overrides.
+When an HTTPS reverse proxy is the browser entry point, set
+`MEGAD_SECURE_COOKIES=true` (or pass `-secure-cookies`) so the administrator
+session cookie is never sent over plain HTTP. The listener address and local
+interface addresses are allowed automatically; add a reverse-proxy DNS name
+with `MEGAD_ALLOWED_HOSTS=downloads.example.test` (comma-separated for more
+than one). Requests with any other browser `Host` are rejected on unsafe
+methods, and `X-Forwarded-*` headers are not trusted.
 `-mega-api-base` exists for deterministic compatibility fixtures and routed
 deployments; normal releases use MEGA's production API endpoint.
 

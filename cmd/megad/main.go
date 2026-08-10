@@ -5,10 +5,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,13 +32,15 @@ func main() {
 	databasePath := flag.String("database", os.Getenv("MEGAD_DATABASE"), "SQLite database path")
 	secretKeyPath := flag.String("secret-key", os.Getenv("MEGAD_SECRET_KEY"), "application secret key path")
 	megaAPIBaseURL := flag.String("mega-api-base", os.Getenv("MEGAD_MEGA_API_BASE_URL"), "MEGA API base URL (for compatibility fixtures and routed deployments)")
+	secureCookies := flag.Bool("secure-cookies", envBool("MEGAD_SECURE_COOKIES"), "mark administrator session cookies Secure (required behind an HTTPS reverse proxy)")
 	flag.Parse()
 
 	application, err := app.Open(context.Background(), app.Config{
-		StateDir:       *stateDir,
-		DatabasePath:   *databasePath,
-		SecretKeyPath:  *secretKeyPath,
-		MegaAPIBaseURL: *megaAPIBaseURL,
+		StateDir:           *stateDir,
+		DatabasePath:       *databasePath,
+		SecretKeyPath:      *secretKeyPath,
+		MegaAPIBaseURL:     *megaAPIBaseURL,
+		DeferDownloadStart: true,
 	})
 	if err != nil {
 		slog.Error("initialize application", "error", err)
@@ -49,17 +55,19 @@ func main() {
 		os.Exit(1)
 	}
 	apiHandler := api.New(api.Config{
-		DB:         application.DB,
-		Secrets:    application.Secrets,
-		Settings:   application.Settings,
-		Auth:       application.Auth,
-		Mega:       application.Mega,
-		Downloads:  application.Downloads,
-		Transports: application.Transports,
-		Events:     application.Events,
-		Version:    build.Version,
-		Commit:     build.Commit,
-		BuildTime:  build.BuildTime,
+		DB:            application.DB,
+		Secrets:       application.Secrets,
+		Settings:      application.Settings,
+		Auth:          application.Auth,
+		Mega:          application.Mega,
+		Downloads:     application.Downloads,
+		Transports:    application.Transports,
+		Events:        application.Events,
+		Version:       build.Version,
+		Commit:        build.Commit,
+		BuildTime:     build.BuildTime,
+		SecureCookies: *secureCookies,
+		AllowedHosts:  allowedHosts(*listenAddress, os.Getenv("MEGAD_ALLOWED_HOSTS")),
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/", apiHandler)
@@ -76,11 +84,32 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	slog.Info("megad listening", "address", server.Addr)
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		_ = application.Close()
+		slog.Error("open HTTP listener", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("megad listening", "address", listener.Addr().String())
 	serverErrors := make(chan error, 1)
 	go func() {
-		serverErrors <- server.ListenAndServe()
+		serverErrors <- server.Serve(listener)
 	}()
+	// Recovery and auto-resume begin only after the HTTP listener is accepting
+	// health and administration requests. This keeps startup failures visible
+	// before any persisted transfer starts writing again.
+	if err := waitForLocalHealth(listener.Addr()); err != nil {
+		_ = server.Close()
+		_ = application.Close()
+		slog.Error("verify HTTP listener health", "error", err)
+		os.Exit(1)
+	}
+	if err := application.Downloads.Start(context.Background()); err != nil {
+		_ = server.Close()
+		_ = application.Close()
+		slog.Error("start download manager", "error", err)
+		os.Exit(1)
+	}
 	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	select {
@@ -110,4 +139,81 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(name string) bool {
+	switch os.Getenv(name) {
+	case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedHosts(listenAddress, configured string) []string {
+	seen := make(map[string]struct{})
+	add := func(host string) {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host != "" {
+			seen[host] = struct{}{}
+		}
+	}
+	for _, host := range strings.Split(configured, ",") {
+		add(host)
+	}
+	host, port, err := net.SplitHostPort(listenAddress)
+	if err == nil {
+		if host != "" && host != "0.0.0.0" && host != "::" {
+			add(net.JoinHostPort(host, port))
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback() {
+			add(net.JoinHostPort("localhost", port))
+			add(net.JoinHostPort("127.0.0.1", port))
+			add(net.JoinHostPort("::1", port))
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			if addresses, addressErr := net.InterfaceAddrs(); addressErr == nil {
+				for _, address := range addresses {
+					if ip, _, parseErr := net.ParseCIDR(address.String()); parseErr == nil {
+						add(net.JoinHostPort(ip.String(), port))
+					}
+				}
+			}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for host := range seen {
+		result = append(result, host)
+	}
+	return result
+}
+
+func waitForLocalHealth(address net.Addr) error {
+	tcpAddress, ok := address.(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("listener address is not TCP")
+	}
+	ip := tcpAddress.IP
+	if ip == nil || ip.IsUnspecified() {
+		if ip != nil && ip.To4() == nil {
+			ip = net.IPv6loopback
+		} else {
+			ip = net.IPv4(127, 0, 0, 1)
+		}
+	}
+	endpoint := "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(tcpAddress.Port)) + "/api/v1/health"
+	client := &http.Client{Timeout: 250 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := client.Get(endpoint)
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("health endpoint did not become ready")
 }

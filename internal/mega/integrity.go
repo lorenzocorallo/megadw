@@ -21,6 +21,10 @@ func VerifyIntegrity(reader io.Reader, size int64, key FileKey) error {
 		return fmt.Errorf("%w: negative file size", ErrIntegrityMismatch)
 	}
 	if size == 0 {
+		var emptyMAC [8]byte
+		if subtle.ConstantTimeCompare(emptyMAC[:], key.MetaMAC[:]) != 1 {
+			return ErrIntegrityMismatch
+		}
 		return nil
 	}
 

@@ -12,6 +12,7 @@ import (
 var (
 	ErrAdminExists = errors.New("administrator already exists")
 	ErrNotFound    = errors.New("record not found")
+	ErrRecordInUse = errors.New("record is selected by a download")
 )
 
 type UserRecord struct {

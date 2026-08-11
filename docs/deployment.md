@@ -5,54 +5,59 @@ with systemd is also supported.
 
 ## Docker Compose
 
-The production image contains only the static `megadw` binary, its embedded
-web interface, and CA certificates. It runs as UID/GID `65532:65532` and does
-not contain Node.js, Java, a shell, or build tools.
+The image contains only the static `megadw` binary, its embedded web interface,
+and CA certificates. It runs as UID/GID `65532:65532` and does not contain
+Node.js, Java, a shell, or build tools.
 
-Copy the example environment file and replace every placeholder with an
-operator-chosen path and an immutable image digest:
+Edit the two bind-mount sources in [compose.yaml](../compose.yaml):
+
+```yaml
+volumes:
+  - type: bind
+    source: /your/path/megadw/state
+    target: /var/lib/megadw
+  - type: bind
+    source: /your/path/megadw/downloads
+    target: /downloads
+```
+
+Then start the service:
 
 ```bash
-cp packaging/megadw.compose.env.example .env
-$EDITOR .env
-docker compose config --quiet
 docker compose up -d
 ```
 
-The relevant files are [compose.yaml](../compose.yaml) and
-[packaging/megadw.compose.env.example](../packaging/megadw.compose.env.example).
+No `.env` file or Docker-specific megadw settings are required.
 
 ### Storage
 
-The Compose file expects two host locations:
+The Compose file expects two host folders:
 
-- `MEGADW_STATE_HOST_PATH` stores SQLite state and the encryption key.
-- `MEGADW_TRANSFER_HOST_PATH` stores partial and completed downloads.
+- `/your/path/megadw/state` stores SQLite state and the encryption key.
+- `/your/path/megadw/downloads` stores partial and completed downloads.
 
 Do not put transfer storage inside the state directory. Mount one common
-transfer parent into the container, then configure sibling incomplete and
-complete roots in **Settings**. For example, with
-`MEGADW_TRANSFER_CONTAINER_ROOT=/downloads`, use
-`/downloads/incomplete` and `/downloads/complete`.
+transfer parent into the container, then configure `/downloads/incomplete` and
+`/downloads/complete` in **Settings**.
 
 Both transfer roots must be on the same filesystem. Completion uses one atomic
 rename, so megadw rejects cross-filesystem roots. Settings validation creates
 missing roots and verifies that the service can write them.
 
-Grant UID/GID `65532:65532` access to both host directories before starting
-the container. Keep the published port bound to loopback unless a trusted
-reverse proxy or controlled network provides access.
+The selected host folders must be writable by the container's non-root user.
+Keep the published port bound to loopback unless a trusted reverse proxy or
+controlled network provides access.
 
 ### Reverse proxy and TLS
 
-Set `MEGADW_ALLOWED_HOSTS` to the exact browser-visible host and port. Use a
-comma-separated list when more than one host is needed.
+The default Docker setup needs no allowed-host configuration. When TLS
+terminates at a named reverse proxy, add the following optional settings under
+the service's `environment` section:
 
-When TLS terminates at a reverse proxy, set:
-
-```dotenv
-MEGADW_ALLOWED_HOSTS=downloads.example.com
-MEGADW_SECURE_COOKIES=true
+```yaml
+environment:
+  MEGADW_ALLOWED_HOSTS: downloads.example.com
+  MEGADW_SECURE_COOKIES: "true"
 ```
 
 This marks the administrator cookie as Secure and permits same-host HTTPS
@@ -68,7 +73,7 @@ bounded checkpoint and shutdown sequence:
 docker compose down
 ```
 
-To upgrade, change `MEGADW_IMAGE` to the new immutable release digest and run:
+To pull and start the latest image:
 
 ```bash
 docker compose pull

@@ -2,7 +2,7 @@ name: megadw
 
 services:
   megadw:
-    image: ${MEGADW_IMAGE:?set MEGADW_IMAGE to an immutable release image}
+    image: ghcr.io/lorenzocorallo/megadw:latest
     user: "65532:65532"
     restart: unless-stopped
     read_only: true
@@ -13,26 +13,15 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 25s
     ports:
-      - "127.0.0.1:${MEGADW_PORT:-8080}:8080"
-    environment:
-      MEGADW_LISTEN: 0.0.0.0:8080
-      MEGADW_ALLOWED_HOSTS: ${MEGADW_ALLOWED_HOSTS:?set the browser-visible host and port}
-      MEGADW_SECURE_COOKIES: ${MEGADW_SECURE_COOKIES:-false}
-      MEGADW_STATE_DIR: /var/lib/megadw
-      # Transfer roots are persisted application settings, not image or
-      # Compose defaults. Configure both roots through the authenticated UI.
+      - "127.0.0.1:8080:8080"
     volumes:
-      # Keep state on its own operator-selected host path.
+      # Change only these two source paths.
       - type: bind
-        source: ${MEGADW_STATE_HOST_PATH:?set an absolute state host path}
+        source: /path/to/megadw/state
         target: /var/lib/megadw
-        read_only: false
-      # One bind mount keeps the two configured transfer roots on one
-      # container filesystem, preserving the atomic-rename requirement.
       - type: bind
-        source: ${MEGADW_TRANSFER_HOST_PATH:?set an absolute transfer host path}
-        target: ${MEGADW_TRANSFER_CONTAINER_ROOT:?set an absolute container mount path}
-        read_only: false
+        source: /path/to/megadw/downloads
+        target: /downloads
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     healthcheck:

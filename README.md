@@ -11,42 +11,24 @@ downloads. It runs as one Go process with the web interface built in.
 
 ## Deploy with Docker Compose
 
-Docker Compose is the recommended way to run megadw.
+Docker Compose is the recommended way to run megadw. In
+[compose.yaml](compose.yaml), change only the two host paths under `volumes`:
 
-1. Create a state directory and a transfer directory. The container runs as
-   UID/GID `65532:65532`, so both must be writable by that user:
+```yaml
+volumes:
+  - type: bind
+    source: /your/path/megadw/state
+    target: /var/lib/megadw
+  - type: bind
+    source: /your/path/megadw/downloads
+    target: /downloads
+```
 
-   ```bash
-   sudo install -d -o 65532 -g 65532 /srv/megadw/state /srv/megadw/transfers
-   ```
+Then start megadw with one command:
 
-2. Copy the example configuration:
-
-   ```bash
-   cp packaging/megadw.compose.env.example .env
-   ```
-
-   To run the current checkout instead of a published release, first build a
-   local image with `docker build -t megadw:local .`, then use
-   `MEGADW_IMAGE=megadw:local` below. Production deployments should use an
-   immutable release digest.
-
-3. Edit `.env` with the image digest for the release you want to run and these
-   paths:
-
-   ```dotenv
-   MEGADW_IMAGE=ghcr.io/lorenzocorallo/megadw@sha256:<release-digest>
-   MEGADW_ALLOWED_HOSTS=127.0.0.1:8080
-   MEGADW_STATE_HOST_PATH=/srv/megadw/state
-   MEGADW_TRANSFER_HOST_PATH=/srv/megadw/transfers
-   MEGADW_TRANSFER_CONTAINER_ROOT=/downloads
-   ```
-
-4. Start it:
-
-   ```bash
-   docker compose up -d
-   ```
+```bash
+docker compose up -d
+```
 
 Open [http://127.0.0.1:8080/setup](http://127.0.0.1:8080/setup), create the
 administrator account, then set these download locations in **Settings**:
@@ -54,9 +36,9 @@ administrator account, then set these download locations in **Settings**:
 - Incomplete root: `/downloads/incomplete`
 - Complete root: `/downloads/complete`
 
-The checked-in [compose.yaml](compose.yaml) is the complete production example.
-It runs read-only and non-root, drops Linux capabilities, includes a
-healthcheck, and keeps application state separate from downloaded files.
+The Compose setup needs no `.env` file. It runs read-only and non-root, drops
+Linux capabilities, includes a healthcheck, and keeps application state
+separate from downloaded files.
 
 To stop the service cleanly:
 

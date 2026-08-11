@@ -60,6 +60,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
       - name: Validate Compose file
-        run: docker compose --env-file packaging/megadw.compose.env.example -f compose.yaml config --quiet
+        run: docker compose -f compose.yaml config --quiet
       - name: Build and smoke-test Docker deployment
         run: MEGADW_DOCKER_IMAGE=megadw:ci make docker-smoke

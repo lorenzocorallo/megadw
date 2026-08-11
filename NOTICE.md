@@ -1,12 +1,19 @@
 # Notice
 
-megadw is distributed under the GNU General Public License, version 3 only (GPL-3.0-only), for this initial implementation.
+megadw is distributed under the MIT License.
 
-Copyright (C) 2026 megadw contributors.
+Copyright (c) 2026 megadw contributors.
 
-Frontend and Go dependencies retain their own upstream copyright and license notices. The direct dependency inventory is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the complete pinned transitive set is checked by `scripts/license-audit.sh` as part of the Phase H release gate.
+The project is an independent implementation. MegaBasterd may be consulted to
+understand user-visible behavior, but its GPL-licensed source code must not be
+copied, translated, or adapted into this repository.
 
-Phase B uses the URL-safe base64 helper from github.com/t3rm1n4l/go-mega,
-copyright (c) 2019 Sarath Lakshman, under the MIT License. The project-owned
-resolver and transfer-facing metadata path remain implemented in
-`internal/mega`; only tested protocol/account primitives are reused.
+The current backend links `github.com/t3rm1n4l/go-mega`, copyright (c) 2019
+Sarath Lakshman, under the MIT License. The upstream copyright and permission
+notice must accompany distributions containing that code.
+
+Frontend and Go dependencies retain their upstream copyrights and licenses.
+The direct inventory is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+and the complete pinned transitive set is checked by
+`scripts/license-audit.sh`. Applicable upstream copyright notices and license
+texts must accompany release artifacts.

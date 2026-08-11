@@ -2,11 +2,11 @@ package webui
 
 import (
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestHandlerServesEmbeddedShellAndClientRoutes(t *testing.T) {
@@ -46,10 +46,10 @@ func TestHandlerDoesNotServeHTMLForMissingHashedAsset(t *testing.T) {
 }
 
 func TestHandlerSetsProductionCachePolicy(t *testing.T) {
-	handler, err := Handler()
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := spaHandler{files: fstest.MapFS{
+		"index.html":            {Data: []byte("megadw")},
+		"assets/app-fixture.js": {Data: []byte("fixture")},
+	}}
 
 	index := httptest.NewRecorder()
 	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -57,12 +57,8 @@ func TestHandlerSetsProductionCachePolicy(t *testing.T) {
 		t.Fatalf("index cache policy = %q", got)
 	}
 
-	entries, err := fs.ReadDir(dist, "dist/assets")
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("read embedded assets: entries=%d err=%v", len(entries), err)
-	}
 	asset := httptest.NewRecorder()
-	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/assets/"+entries[0].Name(), nil))
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/assets/app-fixture.js", nil))
 	if got := asset.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
 		t.Fatalf("asset cache policy = %q", got)
 	}

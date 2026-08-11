@@ -44,15 +44,15 @@ jobs:
       - name: Install frozen dependencies
         run: vp install --frozen-lockfile
       - name: Check frontend
-        run: vp check
+        run: npm run check
       - name: Test frontend
-        run: vp test
+        run: npm test
       - name: Build frontend
-        run: vp build
+        run: npm run build
       - name: Install Chromium for browser tests
-        run: vp exec playwright install --with-deps chromium
+        run: npm exec -- playwright install --with-deps chromium
       - name: Browser E2E
-        run: vp exec playwright test
+        run: npm run e2e
 
   deployment:
     runs-on: ubuntu-latest

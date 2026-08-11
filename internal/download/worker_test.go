@@ -80,6 +80,38 @@ func TestRangeWorkerReadIdleTimeoutClosesStalledBody(t *testing.T) {
 	}
 }
 
+func TestRangeWorkerLimiterWaitDoesNotCountAsReadIdleTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Range", "bytes 0-0/1")
+		writer.Header().Set("Content-Length", "1")
+		writer.WriteHeader(http.StatusPartialContent)
+		ciphertext, err := mega.CryptAt([]byte{42}, testWorkerKey(), 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = writer.Write(ciphertext)
+	}))
+	defer server.Close()
+
+	limiter := NewBandwidthLimiter(100)
+	limiter.mu.Lock()
+	limiter.tokens = 0
+	limiter.mu.Unlock()
+	output := make([]byte, 1)
+	worker := NewRangeWorker(HTTPPayloadFetcher{Client: server.Client()})
+	_, err := worker.DownloadRangeWithOptions(context.Background(), byteWriterAt{data: output}, testWorkerKey(), server.URL, Segment{Start: 0, End: 0}, 1, TransferOptions{
+		Limiter:         limiter,
+		ReadIdleTimeout: 2 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("limiter wait was misclassified as a stalled network read: %v", err)
+	}
+	if output[0] != 42 {
+		t.Fatalf("decrypted byte = %d, want 42", output[0])
+	}
+}
+
 type byteWriterAt struct{ data []byte }
 
 func (w byteWriterAt) WriteAt(data []byte, offset int64) (int, error) {

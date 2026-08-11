@@ -113,6 +113,38 @@ test.describe("Phase G browser flows", () => {
     await expect(page.getByTestId("resolved-download")).toHaveCount(0);
   });
 
+  test("resolves through the selected proxy and invalidates stale metadata", async ({ page }) => {
+    await installMockBackend(page, {
+      proxies: [
+        {
+          id: "proxy-1",
+          name: "Home proxy",
+          type: "http",
+          host: "proxy.example.test",
+          port: 8080,
+          timeoutSeconds: 15,
+          enabled: true,
+          defaultForDownloads: false,
+        },
+      ],
+    });
+    await page.goto("/");
+    await page.getByTestId("add-download").click();
+    await page.getByLabel("MEGA URL").fill("https://mega.nz/file/valid#key");
+    await page.getByRole("button", { name: "Resolve" }).click();
+    await expect(page.getByTestId("resolved-download")).toBeVisible();
+
+    await page.getByLabel("Proxy").selectOption("proxy-1");
+    await expect(page.getByTestId("resolved-download")).toHaveCount(0);
+    const proxiedResolve = page.waitForRequest((request) => {
+      if (!request.url().endsWith("/api/v1/downloads/resolve")) return false;
+      return (request.postDataJSON() as { proxyId?: string }).proxyId === "proxy-1";
+    });
+    await page.getByRole("button", { name: "Resolve" }).click();
+    await proxiedResolve;
+    await expect(page.getByTestId("resolved-download")).toBeVisible();
+  });
+
   test("resolves a folder and displays its file tree", async ({ page }) => {
     await installMockBackend(page);
     await page.goto("/");
@@ -205,9 +237,9 @@ test.describe("Phase G browser flows", () => {
     await expect(page.getByText("Live updates", { exact: true })).toBeVisible();
     await page.evaluate(() => {
       const browser = window as unknown as Window & {
-        __megadSSE: { disconnect: () => void };
+        __megadwSSE: { disconnect: () => void };
       };
-      browser.__megadSSE.disconnect();
+      browser.__megadwSSE.disconnect();
     });
     await expect(page.getByText("Reconnecting", { exact: true })).toBeVisible();
     await expect(page.getByText("Live updates", { exact: true })).toBeVisible();
@@ -271,6 +303,8 @@ async function installMockBackend(
     setupRequired?: boolean;
     authenticated?: boolean;
     downloads?: Download[];
+    accounts?: Array<Record<string, unknown>>;
+    proxies?: Array<Record<string, unknown>>;
   } = {},
 ): Promise<MockState> {
   const state = createMockState(options);
@@ -307,7 +341,7 @@ async function installMockBackend(
       configurable: true,
       value: MockEventSource,
     });
-    Object.defineProperty(window, "__megadSSE", {
+    Object.defineProperty(window, "__megadwSSE", {
       configurable: true,
       value: {
         disconnect() {
@@ -334,13 +368,15 @@ function createMockState(options: {
   setupRequired?: boolean;
   authenticated?: boolean;
   downloads?: Download[];
+  accounts?: Array<Record<string, unknown>>;
+  proxies?: Array<Record<string, unknown>>;
 }): MockState {
   return {
     setupRequired: options.setupRequired ?? false,
     authenticated: options.authenticated ?? true,
     downloads: options.downloads ?? emptyDownloads.map((item) => ({ ...item })),
-    accounts: [],
-    proxies: [],
+    accounts: options.accounts ?? [],
+    proxies: options.proxies ?? [],
     settings: {
       paths: { incompleteRoot: "/incomplete", completeRoot: "/complete" },
       downloads: {

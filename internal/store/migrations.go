@@ -9,7 +9,7 @@ import (
 
 const initialMigrationVersion = 1
 
-// initialMigrationSQL is kept in the binary because megad is intentionally a
+// initialMigrationSQL is kept in the binary because megadw is intentionally a
 // single self-contained executable. The checked-in SQL file is the readable
 // source counterpart used by operators and migration tooling.
 const initialMigrationSQL = `

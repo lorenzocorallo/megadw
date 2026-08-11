@@ -34,17 +34,17 @@ RUN rm -rf internal/webui/dist/* \
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -mod=readonly -trimpath \
     -ldflags "-X github.com/lorenzocorallo/megadw/internal/buildinfo.Version=${VERSION} -X github.com/lorenzocorallo/megadw/internal/buildinfo.Commit=${COMMIT} -X github.com/lorenzocorallo/megadw/internal/buildinfo.BuildTime=${BUILD_TIME}" \
-    -o /out/megad ./cmd/megad
+    -o /out/megadw ./cmd/megadw
 
 # The release stage contains only the self-contained Go process and the CA
 # bundle supplied by the pinned distroless base. Node.js, Java, shells, and
 # package managers are build-time dependencies only.
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
 
-COPY --from=backend-build /out/megad /usr/local/bin/megad
+COPY --from=backend-build /out/megadw /usr/local/bin/megadw
 USER 65532:65532
-ENV MEGAD_LISTEN=0.0.0.0:8080
+ENV MEGADW_LISTEN=0.0.0.0:8080
 EXPOSE 8080
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/megad", "-healthcheck"]
-ENTRYPOINT ["/usr/local/bin/megad"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/megadw", "-healthcheck"]
+ENTRYPOINT ["/usr/local/bin/megadw"]

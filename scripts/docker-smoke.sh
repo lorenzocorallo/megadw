@@ -27,9 +27,9 @@ chmod 0777 "$RUN_ROOT/state" "$RUN_ROOT/transfer"
 	--read-only \
 	--cap-drop ALL \
 	--security-opt no-new-privileges:true \
-	--env "MEGAD_ALLOWED_HOSTS=127.0.0.1:$PORT" \
+	--env "MEGADW_ALLOWED_HOSTS=127.0.0.1:$PORT" \
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-	--volume "$RUN_ROOT/state:/var/lib/megad:rw" \
+	--volume "$RUN_ROOT/state:/var/lib/megadw:rw" \
 	--volume "$RUN_ROOT/transfer:/transfer:rw" \
 	"$IMAGE" >/dev/null
 

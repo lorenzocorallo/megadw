@@ -1,4 +1,4 @@
-// Command megad-benchmark runs the release resource matrix against the same
+// Command megadw-benchmark runs the release resource matrix against the same
 // resumable manager used by the application. The deterministic fixture is a
 // separate process, so downloader RSS and CPU measurements do not include the
 // fixture's plaintext or encryption buffers.
@@ -79,7 +79,7 @@ func main() {
 		fatalf("fixture size must be at least %d bytes", segmentSize)
 	}
 	if *fixtureBinary == "" {
-		*fixtureBinary = filepath.Join(filepath.Dir(os.Args[0]), "megad-bench-fixture")
+		*fixtureBinary = filepath.Join(filepath.Dir(os.Args[0]), "megadw-bench-fixture")
 	}
 	selected, err := selectProfiles(*profileName)
 	if err != nil {
@@ -130,7 +130,7 @@ func runMeasurement(current profile, workers int, size int64, delay time.Duratio
 	defer os.RemoveAll(runRoot)
 	completeRoot := filepath.Join(runRoot, "complete")
 	incompleteRoot := filepath.Join(runRoot, "incomplete")
-	databasePath := filepath.Join(runRoot, "megad.sqlite3")
+	databasePath := filepath.Join(runRoot, "megadw.sqlite3")
 	db, err := store.Open(context.Background(), databasePath)
 	if err != nil {
 		return measurement{}, err

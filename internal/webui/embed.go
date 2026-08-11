@@ -35,7 +35,16 @@ func (h spaHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		requested = "index.html"
 	}
 	if _, err := fs.Stat(h.files, requested); err != nil {
+		if strings.HasPrefix(requested, "assets/") {
+			http.NotFound(writer, request)
+			return
+		}
 		requested = "index.html"
+	}
+	if requested == "index.html" {
+		writer.Header().Set("Cache-Control", "no-cache")
+	} else if strings.HasPrefix(requested, "assets/") {
+		writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 
 	clone := request.Clone(request.Context())

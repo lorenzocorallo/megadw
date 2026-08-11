@@ -1,6 +1,6 @@
 {
   "app": {
-    "name": "MEGA Downloader",
+    "name": "megadw",
     "tagline": "A dependable home for your downloads"
   },
   "nav": {
@@ -55,7 +55,7 @@
     },
     "downloadSettings": {
       "title": "Download settings",
-      "description": "Tune bounded segment and retry settings for future workers."
+      "description": "Limits, retries, and checkpoints apply to new work. Restart after changing concurrency or connection/header timeouts."
     },
     "accounts": {
       "title": "Accounts",
@@ -241,8 +241,14 @@
     "maxActiveFiles": "Maximum active files",
     "maxGlobalWorkers": "Maximum global workers",
     "globalSpeedLimit": "Global speed limit (bytes/s)",
+    "perJobSpeedLimit": "Default per-download speed limit (bytes/s)",
     "checkpointInterval": "Checkpoint interval (ms)",
+    "checkpointBytes": "Checkpoint threshold (bytes)",
     "normalRetryLimit": "Normal retry limit",
+    "networkLimits": "Network timeouts",
+    "connectTimeout": "Connect timeout (seconds)",
+    "responseHeaderTimeout": "Response header timeout (seconds)",
+    "readIdleTimeout": "Read idle timeout (seconds)",
     "theme": "Theme",
     "themeSystem": "System",
     "themeLight": "Light",

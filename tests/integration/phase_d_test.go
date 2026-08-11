@@ -462,7 +462,7 @@ func TestPhaseDInterruptedTransferKeepsPartialAndResumes(t *testing.T) {
 }
 
 func TestPhaseDKillAndRestartResumesPersistedBitmap(t *testing.T) {
-	if os.Getenv("MEGAD_PHASE_D_HELPER") == "1" {
+	if os.Getenv("MEGADW_PHASE_D_HELPER") == "1" {
 		return
 	}
 	fixture := NewFakeMegaServerWithOptions(FakeMegaServerOptions{PayloadSize: 100 << 20, Delay: 200 * time.Millisecond})
@@ -563,14 +563,14 @@ func TestPhaseDKillAndRestartResumesPersistedBitmap(t *testing.T) {
 }
 
 func TestPhaseDWorkerProcess(t *testing.T) {
-	if os.Getenv("MEGAD_PHASE_D_HELPER") != "1" {
+	if os.Getenv("MEGADW_PHASE_D_HELPER") != "1" {
 		return
 	}
-	stateDir := os.Getenv("MEGAD_PHASE_D_STATE_DIR")
-	databasePath := os.Getenv("MEGAD_PHASE_D_DATABASE")
-	secretKeyPath := os.Getenv("MEGAD_PHASE_D_SECRET")
-	apiURL := os.Getenv("MEGAD_PHASE_D_API")
-	jobID := os.Getenv("MEGAD_PHASE_D_JOB")
+	stateDir := os.Getenv("MEGADW_PHASE_D_STATE_DIR")
+	databasePath := os.Getenv("MEGADW_PHASE_D_DATABASE")
+	secretKeyPath := os.Getenv("MEGADW_PHASE_D_SECRET")
+	apiURL := os.Getenv("MEGADW_PHASE_D_API")
+	jobID := os.Getenv("MEGADW_PHASE_D_JOB")
 	application, err := app.Open(context.Background(), app.Config{StateDir: stateDir, DatabasePath: databasePath, SecretKeyPath: secretKeyPath, MegaAPIBaseURL: apiURL})
 	if err != nil {
 		t.Fatal(err)
@@ -595,12 +595,12 @@ func startPhaseDHelper(t *testing.T, databasePath, secretPath, apiURL, jobID str
 	output := new(bytes.Buffer)
 	command := exec.Command(os.Args[0], "-test.run=^TestPhaseDWorkerProcess$", "-test.v")
 	command.Env = append(os.Environ(),
-		"MEGAD_PHASE_D_HELPER=1",
-		"MEGAD_PHASE_D_STATE_DIR="+filepath.Dir(databasePath),
-		"MEGAD_PHASE_D_DATABASE="+databasePath,
-		"MEGAD_PHASE_D_SECRET="+secretPath,
-		"MEGAD_PHASE_D_API="+apiURL,
-		"MEGAD_PHASE_D_JOB="+jobID,
+		"MEGADW_PHASE_D_HELPER=1",
+		"MEGADW_PHASE_D_STATE_DIR="+filepath.Dir(databasePath),
+		"MEGADW_PHASE_D_DATABASE="+databasePath,
+		"MEGADW_PHASE_D_SECRET="+secretPath,
+		"MEGADW_PHASE_D_API="+apiURL,
+		"MEGADW_PHASE_D_JOB="+jobID,
 	)
 	command.Stdout = output
 	command.Stderr = output
@@ -625,7 +625,7 @@ func newPhaseDManager(t *testing.T, fixture *FakeMegaServer) (*download.Manager,
 	t.Helper()
 	root := t.TempDir()
 	roots := phaseDRoots{incomplete: filepath.Join(root, "incomplete"), complete: filepath.Join(root, "complete")}
-	db, err := store.Open(context.Background(), filepath.Join(root, "megad.sqlite3"))
+	db, err := store.Open(context.Background(), filepath.Join(root, "megadw.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}

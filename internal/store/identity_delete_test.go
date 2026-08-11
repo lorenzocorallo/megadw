@@ -9,7 +9,7 @@ import (
 )
 
 func TestSelectedAccountAndProxyCannotBeDeletedOutFromUnderAJob(t *testing.T) {
-	database, err := Open(context.Background(), filepath.Join(t.TempDir(), "megad.sqlite3"))
+	database, err := Open(context.Background(), filepath.Join(t.TempDir(), "megadw.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,12 +16,12 @@ run_signal_case() {
 	signal_name=$1
 	port=$2
 	root="$RUN_ROOT/$signal_name"
-	log_file="$root/megad.log"
+	log_file="$root/megadw.log"
 	mkdir -p "$root"
 	"$BINARY" \
 		-listen "127.0.0.1:$port" \
 		-state-dir "$root/state" \
-		-database "$root/state/megad.sqlite3" \
+		-database "$root/state/megadw.sqlite3" \
 		-secret-key "$root/state/secret.key" \
 		>"$log_file" 2>&1 &
 	pid=$!

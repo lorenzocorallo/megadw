@@ -1,8 +1,8 @@
-name: megad
+name: megadw
 
 services:
-  megad:
-    image: ${MEGAD_IMAGE:?set MEGAD_IMAGE to an immutable release image}
+  megadw:
+    image: ${MEGADW_IMAGE:?set MEGADW_IMAGE to an immutable release image}
     user: "65532:65532"
     restart: unless-stopped
     read_only: true
@@ -13,29 +13,30 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 25s
     ports:
-      - "127.0.0.1:${MEGAD_PORT:-8080}:8080"
+      - "127.0.0.1:${MEGADW_PORT:-8080}:8080"
     environment:
-      MEGAD_LISTEN: 0.0.0.0:8080
-      MEGAD_ALLOWED_HOSTS: ${MEGAD_ALLOWED_HOSTS:?set the browser-visible host and port}
-      MEGAD_STATE_DIR: /var/lib/megad
+      MEGADW_LISTEN: 0.0.0.0:8080
+      MEGADW_ALLOWED_HOSTS: ${MEGADW_ALLOWED_HOSTS:?set the browser-visible host and port}
+      MEGADW_SECURE_COOKIES: ${MEGADW_SECURE_COOKIES:-false}
+      MEGADW_STATE_DIR: /var/lib/megadw
       # Transfer roots are persisted application settings, not image or
       # Compose defaults. Configure both roots through the authenticated UI.
     volumes:
       # Keep state on its own operator-selected host path.
       - type: bind
-        source: ${MEGAD_STATE_HOST_PATH:?set an absolute state host path}
-        target: /var/lib/megad
+        source: ${MEGADW_STATE_HOST_PATH:?set an absolute state host path}
+        target: /var/lib/megadw
         read_only: false
       # One bind mount keeps the two configured transfer roots on one
       # container filesystem, preserving the atomic-rename requirement.
       - type: bind
-        source: ${MEGAD_TRANSFER_HOST_PATH:?set an absolute transfer host path}
-        target: ${MEGAD_TRANSFER_CONTAINER_ROOT:?set an absolute container mount path}
+        source: ${MEGADW_TRANSFER_HOST_PATH:?set an absolute transfer host path}
+        target: ${MEGADW_TRANSFER_CONTAINER_ROOT:?set an absolute container mount path}
         read_only: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     healthcheck:
-      test: ["CMD", "/usr/local/bin/megad", "-healthcheck"]
+      test: ["CMD", "/usr/local/bin/megadw", "-healthcheck"]
       interval: 30s
       timeout: 3s
       start_period: 10s

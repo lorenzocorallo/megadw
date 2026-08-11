@@ -1,4 +1,4 @@
-// Command megad-bench-fixture serves the project-owned deterministic MEGA
+// Command megadw-bench-fixture serves the project-owned deterministic MEGA
 // fixture as a separate process so release resource measurements do not count
 // the fixture's plaintext buffer or encryption work against the downloader.
 package main

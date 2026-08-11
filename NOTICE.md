@@ -1,8 +1,8 @@
 # Notice
 
-MEGA Downloader is distributed under the GNU General Public License, version 3 only (GPL-3.0-only), for this initial implementation.
+megadw is distributed under the GNU General Public License, version 3 only (GPL-3.0-only), for this initial implementation.
 
-Copyright (C) 2026 MEGA Downloader contributors.
+Copyright (C) 2026 megadw contributors.
 
 Frontend and Go dependencies retain their own upstream copyright and license notices. The direct dependency inventory is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the complete pinned transitive set is checked by `scripts/license-audit.sh` as part of the Phase H release gate.
 

@@ -14,7 +14,7 @@ import (
 
 func TestCloseContextWaitsForRunningQuotaTimerCallback(t *testing.T) {
 	root := t.TempDir()
-	database, err := store.Open(context.Background(), filepath.Join(root, "megad.sqlite3"))
+	database, err := store.Open(context.Background(), filepath.Join(root, "megadw.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}

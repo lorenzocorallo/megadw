@@ -1,4 +1,4 @@
-# Development Plan - MEGA Downloader (Go + React)
+# Development Plan - megadw (Go + React)
 
 Status: implementation-ready MVP plan, revised 2026-08-08
 Primary scope: high-performance MEGA downloading only
@@ -32,8 +32,8 @@ The implementation agents MUST follow these decisions. Do not substitute librari
 18. MEGA transfer limits: the application MUST be quota-aware and resume reliably after MEGA permits transfers again. It MUST NOT automatically rotate IPs, proxy identities, or accounts in response to quota errors for the purpose of bypassing MEGA transfer limits. Proxy support is for explicit network routing. HTTP 509 / over-quota states cause pause/backoff/retry, not identity rotation.
 19. Storage paths:
     - incomplete and complete transfer roots: no defaults; both must be explicitly configured as valid absolute paths before transfers are enabled;
-    - application state: `/var/lib/megad` by default;
-    - database: `/var/lib/megad/megad.sqlite3` by default.
+    - application state: `/var/lib/megadw` by default;
+    - database: `/var/lib/megadw/megadw.sqlite3` by default.
       Application state is separate from transfer storage. Existing persisted job roots and files are never moved automatically during upgrade.
 20. Partial download storage: one sparse `.mega.part` file per remote file. Never create one temporary file per chunk. Never require a second full-size copy for merging.
 21. A completed file is moved from `incomplete` to `complete` with an atomic rename. The two paths MUST be on the same filesystem; detect and warn if they are not.
@@ -71,7 +71,7 @@ Create these package boundaries. The named top-level and `internal/` packages ar
   go.mod
   go.sum
   cmd/
-    megad/
+    megadw/
       main.go
   internal/
     api/
@@ -167,9 +167,9 @@ Create these package boundaries. The named top-level and `internal/` packages ar
       fake_proxy.go
       fixtures/
   packaging/
-    megad.service
-    megad.env.example
-    megad.compose.env.example
+    megadw.service
+    megadw.env.example
+    megadw.compose.env.example
 ```
 
 Generated files may add to this tree. Keep the major package boundaries stable, but agents may refactor filenames inside a package when tests and imports remain coherent.
@@ -208,7 +208,7 @@ Do not add an ORM, dependency-injection container, task-queue framework, generic
 
 ## 4. Backend process model
 
-The `megad` binary owns all application state.
+The `megadw` binary owns all application state.
 
 Startup sequence:
 
@@ -395,7 +395,7 @@ Rules:
 
 Generate a 32-byte application secret at first launch and store it at:
 
-`/var/lib/megad/secret.key`
+`/var/lib/megadw/secret.key`
 
 File mode MUST be `0600` and ownership must match the service user.
 
@@ -1277,7 +1277,7 @@ go vet ./...
 go mod verify
 govulncheck ./...
 go test -race ./...
-go build -trimpath -o dist/megad ./cmd/megad
+go build -trimpath -o dist/megadw ./cmd/megadw
 ```
 
 ### Root Makefile
@@ -1297,7 +1297,7 @@ make clean
 1. build frontend;
 2. replace `internal/webui/dist` with `web/dist`;
 3. build Go binary;
-4. output `dist/megad`.
+4. output `dist/megadw`.
 
 Production must not require Node or Java.
 
@@ -1327,14 +1327,14 @@ filesystem for atomic rename. State MUST use a separate host path or volume.
 Docker and native deployments use the same persisted settings semantics.
 
 Native packaging remains supported through the single binary and
-`packaging/megad.service`. Create system user `megad` and grant the state
+`packaging/megadw.service`. Create system user `megadw` and grant the state
 directory plus the explicitly selected transfer roots only. The unit MUST
 include:
 
 ```text
-User=megad
+User=megadw
 Group=media
-StateDirectory=megad
+StateDirectory=megadw
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -1348,7 +1348,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/var/lib/megad
+ReadWritePaths=/var/lib/megadw
 ```
 
 Do not enable `PrivateNetwork` because the downloader needs outbound network access.

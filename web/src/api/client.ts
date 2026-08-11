@@ -183,10 +183,10 @@ export function putSettings(value: Settings) {
   });
 }
 
-export function resolveDownload(url: string, accountId = "") {
+export function resolveDownload(url: string, accountId = "", proxyId = "") {
   return apiRequest<ResolvedDownload>("/api/v1/downloads/resolve", {
     method: "POST",
-    body: JSON.stringify({ url, accountId }),
+    body: JSON.stringify({ url, accountId, proxyId }),
   });
 }
 

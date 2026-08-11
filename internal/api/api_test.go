@@ -30,7 +30,7 @@ func TestSetupLoginSettingsResolveAndCreateKeepSecretsOutOfSQLite(t *testing.T) 
 	stateDir := t.TempDir()
 	config := app.Config{
 		StateDir:       stateDir,
-		DatabasePath:   filepath.Join(stateDir, "megad.sqlite3"),
+		DatabasePath:   filepath.Join(stateDir, "megadw.sqlite3"),
 		SecretKeyPath:  filepath.Join(stateDir, "secret.key"),
 		MegaAPIBaseURL: fixture.APIBaseURL(),
 		HTTPClient:     fixture.HTTPClient(),
@@ -170,6 +170,14 @@ func TestVersionExposesReleaseBuildMetadata(t *testing.T) {
 		if !strings.Contains(response.body, value) {
 			t.Fatalf("version response missing %s: %s", value, response.body)
 		}
+	}
+}
+
+func TestHealthReturnsServiceUnavailableWhenDatabaseIsUnavailable(t *testing.T) {
+	handler := api.New(api.Config{})
+	response := doJSON(t, handler, http.MethodGet, "/api/v1/health", "", nil)
+	if response.status != http.StatusServiceUnavailable {
+		t.Fatalf("degraded health status = %d, want %d: %s", response.status, http.StatusServiceUnavailable, response.body)
 	}
 }
 

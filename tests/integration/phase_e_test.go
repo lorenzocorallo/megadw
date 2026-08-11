@@ -521,7 +521,7 @@ func newPhaseEManagerWithLimits(tb testing.TB, fixture *FakeMegaServer, workersP
 	tb.Helper()
 	root := tb.TempDir()
 	roots := phaseDRoots{incomplete: filepath.Join(root, "incomplete"), complete: filepath.Join(root, "complete")}
-	db, err := store.Open(context.Background(), filepath.Join(root, "megad.sqlite3"))
+	db, err := store.Open(context.Background(), filepath.Join(root, "megadw.sqlite3"))
 	if err != nil {
 		tb.Fatal(err)
 	}

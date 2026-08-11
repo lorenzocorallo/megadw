@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	DefaultStateDir = "/var/lib/megad"
-	DefaultDatabase = "megad.sqlite3"
+	DefaultStateDir = "/var/lib/megadw"
+	DefaultDatabase = "megadw.sqlite3"
 	DefaultSecret   = "secret.key"
 )
 

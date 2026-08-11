@@ -7,9 +7,9 @@ DOCKER ?= docker
 WEB_DIR := web
 EMBED_DIR := internal/webui/dist
 OUTPUT_DIR := dist
-OUTPUT_BINARY := $(OUTPUT_DIR)/megad
-BENCH_BINARY := $(OUTPUT_DIR)/megad-benchmark
-FIXTURE_BINARY := $(OUTPUT_DIR)/megad-bench-fixture
+OUTPUT_BINARY := $(OUTPUT_DIR)/megadw
+BENCH_BINARY := $(OUTPUT_DIR)/megadw-benchmark
+FIXTURE_BINARY := $(OUTPUT_DIR)/megadw-bench-fixture
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
@@ -53,7 +53,7 @@ build: web-build
 	mkdir -p $(EMBED_DIR) $(OUTPUT_DIR)
 	rm -rf $(EMBED_DIR)/*
 	cp -R $(WEB_DIR)/dist/. $(EMBED_DIR)/
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o $(OUTPUT_BINARY) ./cmd/megad
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o $(OUTPUT_BINARY) ./cmd/megadw
 
 audit:
 	sh scripts/audit-systemd.sh
@@ -68,15 +68,15 @@ graceful-shutdown: build
 
 resource-benchmark:
 	mkdir -p $(OUTPUT_DIR)
-	$(GO) build -trimpath -o $(FIXTURE_BINARY) ./cmd/megad-bench-fixture
-	$(GO) build -trimpath -o $(BENCH_BINARY) ./cmd/megad-benchmark
+	$(GO) build -trimpath -o $(FIXTURE_BINARY) ./cmd/megadw-bench-fixture
+	$(GO) build -trimpath -o $(BENCH_BINARY) ./cmd/megadw-benchmark
 	sh scripts/resource-benchmark.sh "$(BENCH_BINARY)" "$(FIXTURE_BINARY)"
 
 production-smoke: build
 	GO="$(GO)" sh scripts/production-smoke.sh $(OUTPUT_BINARY)
 
 docker-build:
-	$(DOCKER) build --tag megad:local .
+	$(DOCKER) build --tag megadw:local .
 
 docker-smoke:
 	DOCKER="$(DOCKER)" sh scripts/docker-smoke.sh

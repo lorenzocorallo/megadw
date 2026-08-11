@@ -14,7 +14,7 @@ import (
 )
 
 func TestOpenConfiguresWALAndMigrates(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "state", "megad.sqlite3")
+	databasePath := filepath.Join(t.TempDir(), "state", "megadw.sqlite3")
 	db, err := store.Open(context.Background(), databasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestSecretStoreRejectsSymlinkPath(t *testing.T) {
 }
 
 func TestSettingsRestartAndAtomicValidation(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "megad.sqlite3")
+	databasePath := filepath.Join(t.TempDir(), "megadw.sqlite3")
 	open := func() (*store.DB, *settings.Service) {
 		db, err := store.Open(context.Background(), databasePath)
 		if err != nil {
@@ -157,7 +157,7 @@ func TestSettingsRestartAndAtomicValidation(t *testing.T) {
 }
 
 func TestPersistedExplicitTransferRootsAreNotRewrittenOnUpgrade(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "megad.sqlite3")
+	databasePath := filepath.Join(t.TempDir(), "megadw.sqlite3")
 	db, err := store.Open(context.Background(), databasePath)
 	if err != nil {
 		t.Fatal(err)

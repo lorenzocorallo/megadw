@@ -1,16 +1,16 @@
 [Unit]
-Description=MEGA Downloader
+Description=megadw
 Documentation=https://github.com/lorenzocorallo/megadw
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=megad
+User=megadw
 Group=media
-ExecStart=/usr/local/bin/megad
-EnvironmentFile=-/etc/megad/megad.env
-StateDirectory=megad
+ExecStart=/usr/local/bin/megadw
+EnvironmentFile=-/etc/megadw/megadw.env
+StateDirectory=megadw
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=20s
@@ -32,9 +32,9 @@ RestrictRealtime=true
 RestrictNamespaces=true
 PrivateDevices=true
 # Transfer roots are deliberately not baked into the unit. Add the two
-# explicitly configured roots in a megad.service drop-in after setup; keeping
+# explicitly configured roots in a megadw.service drop-in after setup; keeping
 # this allow-list narrow preserves ProtectSystem=strict for the native install.
-ReadWritePaths=/var/lib/megad
+ReadWritePaths=/var/lib/megadw
 
 [Install]
 WantedBy=multi-user.target

@@ -134,6 +134,7 @@ type Manager struct {
 
 	checkpoint *CheckpointManager
 
+	runtimeMu          sync.RWMutex
 	checkpointInterval time.Duration
 	checkpointBytes    int64
 	conflictPolicy     string
@@ -185,6 +186,16 @@ type Manager struct {
 	quotaAll    map[*quotaTimer]struct{}
 }
 
+type runtimeSettings struct {
+	checkpointInterval time.Duration
+	checkpointBytes    int64
+	conflictPolicy     string
+	workersPerFile     int
+	perJobLimit        int64
+	readIdleTimeout    time.Duration
+	normalRetryLimit   int
+}
+
 func NewManager(config Config) (*Manager, error) {
 	if config.DB == nil {
 		return nil, fmt.Errorf("download database is required")
@@ -196,7 +207,8 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, fmt.Errorf("MEGA client is required")
 	}
 
-	if config.Settings != nil {
+	settingsProvided := config.Settings != nil
+	if settingsProvided {
 		value, err := config.Settings.Get(context.Background())
 		if err != nil {
 			return nil, fmt.Errorf("read download settings: %w", err)
@@ -271,7 +283,7 @@ func NewManager(config Config) (*Manager, error) {
 	if config.ReadIdleTimeout == 0 {
 		config.ReadIdleTimeout = defaultReadIdleTimeout
 	}
-	if config.NormalRetryLimit == 0 {
+	if !settingsProvided && config.NormalRetryLimit == 0 {
 		config.NormalRetryLimit = 5
 	}
 	if config.NormalRetryLimit < 0 || config.NormalRetryLimit > 20 {
@@ -319,6 +331,40 @@ func NewManager(config Config) (*Manager, error) {
 	}
 	heap.Init(&manager.queue)
 	return manager, nil
+}
+
+// ApplySettings updates transfer controls that can safely change without
+// rebuilding semaphore and transport ownership. Concurrency ceilings and
+// connect/header timeouts remain startup settings; the values below apply to
+// new files or segment claims immediately.
+func (m *Manager) ApplySettings(value settings.Settings) {
+	if m == nil {
+		return
+	}
+	m.globalLimiter.SetRate(value.Downloads.GlobalSpeedLimitBytesPerSecond)
+	m.runtimeMu.Lock()
+	m.checkpointInterval = time.Duration(value.Downloads.CheckpointIntervalMs) * time.Millisecond
+	m.checkpointBytes = value.Downloads.CheckpointBytes
+	m.conflictPolicy = value.Downloads.ConflictPolicy
+	m.workersPerFile = value.Downloads.WorkersPerFile
+	m.perJobLimit = value.Downloads.PerJobDefaultLimitBytesPerSecond
+	m.readIdleTimeout = time.Duration(value.Network.ReadIdleTimeoutSeconds) * time.Second
+	m.normalRetryLimit = value.Downloads.NormalRetryLimit
+	m.runtimeMu.Unlock()
+}
+
+func (m *Manager) runtimeSettings() runtimeSettings {
+	m.runtimeMu.RLock()
+	defer m.runtimeMu.RUnlock()
+	return runtimeSettings{
+		checkpointInterval: m.checkpointInterval,
+		checkpointBytes:    m.checkpointBytes,
+		conflictPolicy:     m.conflictPolicy,
+		workersPerFile:     m.workersPerFile,
+		perJobLimit:        m.perJobLimit,
+		readIdleTimeout:    m.readIdleTimeout,
+		normalRetryLimit:   m.normalRetryLimit,
+	}
 }
 
 // Start recovers in-flight rows and begins the bounded priority queue loop.
@@ -1330,8 +1376,9 @@ func (m *Manager) runJob(ctx context.Context, jobID string) error {
 
 	meter := m.getSpeedMeter(job.ID)
 	var jobLimiter *BandwidthLimiter
-	if m.perJobLimit > 0 {
-		jobLimiter = NewBandwidthLimiter(m.perJobLimit)
+	runtime := m.runtimeSettings()
+	if runtime.perJobLimit > 0 {
+		jobLimiter = NewBandwidthLimiter(runtime.perJobLimit)
 	}
 	workCtx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -1446,6 +1493,7 @@ func (m *Manager) processFile(ctx context.Context, job *store.DownloadJobRecord,
 }
 
 func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.DownloadJobRecord, file *store.DownloadFileRecord, limiter *BandwidthLimiter, meter *SpeedMeter) error {
+	runtime := m.runtimeSettings()
 	planner, err := NewSegmentPlanner(file.SizeBytes, file.SegmentSizeBytes)
 	if err != nil {
 		return err
@@ -1516,7 +1564,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 	}
 
 	pendingSegments := planner.Count - bitmap.Count()
-	workerCount := m.workersPerFile
+	workerCount := runtime.workersPerFile
 	if pendingSegments < int64(workerCount) {
 		workerCount = int(pendingSegments)
 	}
@@ -1566,7 +1614,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 		close(results)
 	}()
 
-	ticker := time.NewTicker(m.checkpointInterval)
+	ticker := time.NewTicker(runtime.checkpointInterval)
 	defer ticker.Stop()
 	var transferErr error
 	resultsOpen := true
@@ -1601,7 +1649,7 @@ func (m *Manager) processFileWithTransfer(ctx context.Context, job *store.Downlo
 			bytesSinceCheckpoint += result.segment.Size()
 			dirty = true
 			m.publishProgress(job.ID, file.ID, string(FileDownloading), committed, file.SizeBytes)
-			if bytesSinceCheckpoint >= m.checkpointBytes {
+			if bytesSinceCheckpoint >= runtime.checkpointBytes {
 				if checkpointErr := checkpoint(); checkpointErr != nil {
 					transferErr = checkpointErr
 					stop()
@@ -1685,8 +1733,9 @@ func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.Downl
 		return 0, err
 	}
 	refreshes := 0
+	runtime := m.runtimeSettings()
 	for retry := 0; ; retry++ {
-		written, err := worker.DownloadRangeWithOptions(ctx, writer, key, payloadURL, segment, file.SizeBytes, TransferOptions{Limiter: limiter, GlobalLimiter: m.globalLimiter, Meter: meter, ReadIdleTimeout: m.readIdleTimeout})
+		written, err := worker.DownloadRangeWithOptions(ctx, writer, key, payloadURL, segment, file.SizeBytes, TransferOptions{Limiter: limiter, GlobalLimiter: m.globalLimiter, Meter: meter, ReadIdleTimeout: runtime.readIdleTimeout})
 		if err == nil {
 			return written, nil
 		}
@@ -1722,7 +1771,7 @@ func (m *Manager) downloadSegmentWithRetry(ctx context.Context, job *store.Downl
 			err = fmt.Errorf("refresh MEGA payload URL: %w", refreshErr)
 			class = ClassifyRetry(err)
 		}
-		if (class != RetryTransport && class != RetryRateLimit && class != RetryServer) || retry >= m.normalRetryLimit {
+		if (class != RetryTransport && class != RetryRateLimit && class != RetryServer) || retry >= runtime.normalRetryLimit {
 			return written, err
 		}
 		statusRetryAfter := ""
@@ -2033,7 +2082,7 @@ func (m *Manager) finalize(ctx context.Context, job *store.DownloadJobRecord, fi
 		return "", err
 	}
 	defer completeRoot.Close()
-	policy := m.conflictPolicy
+	policy := m.runtimeSettings().conflictPolicy
 	if policy == "" && m.settings != nil {
 		if value, settingsErr := m.settings.Get(context.Background()); settingsErr == nil {
 			policy = value.Downloads.ConflictPolicy

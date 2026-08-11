@@ -39,4 +39,7 @@ func TestPathsRemainUnconfiguredUntilBothRootsAreSet(t *testing.T) {
 	if value.Paths.Configured() {
 		t.Fatal("one configured root enabled transfers")
 	}
+	if err := value.Validate(); err == nil {
+		t.Fatal("settings accepted only one configured transfer root")
+	}
 }

@@ -1,4 +1,4 @@
-// Command megad serves the MEGA Downloader application.
+// Command megadw serves the megadw application.
 package main
 
 import (
@@ -30,13 +30,13 @@ const defaultListenAddress = "127.0.0.1:8080"
 func main() {
 	slog.SetDefault(logging.NewTextLogger(os.Stdout))
 	healthcheck := flag.Bool("healthcheck", false, "check the local HTTP health endpoint and exit")
-	healthcheckURL := flag.String("healthcheck-url", envOrDefault("MEGAD_HEALTHCHECK_URL", "http://127.0.0.1:8080/api/v1/health"), "health endpoint URL")
-	listenAddress := flag.String("listen", envOrDefault("MEGAD_LISTEN", defaultListenAddress), "HTTP listen address")
-	stateDir := flag.String("state-dir", envOrDefault("MEGAD_STATE_DIR", app.DefaultStateDir), "application state directory")
-	databasePath := flag.String("database", os.Getenv("MEGAD_DATABASE"), "SQLite database path")
-	secretKeyPath := flag.String("secret-key", os.Getenv("MEGAD_SECRET_KEY"), "application secret key path")
-	megaAPIBaseURL := flag.String("mega-api-base", os.Getenv("MEGAD_MEGA_API_BASE_URL"), "MEGA API base URL (for compatibility fixtures and routed deployments)")
-	secureCookies := flag.Bool("secure-cookies", envBool("MEGAD_SECURE_COOKIES"), "mark administrator session cookies Secure (required behind an HTTPS reverse proxy)")
+	healthcheckURL := flag.String("healthcheck-url", envOrDefault("MEGADW_HEALTHCHECK_URL", "http://127.0.0.1:8080/api/v1/health"), "health endpoint URL")
+	listenAddress := flag.String("listen", envOrDefault("MEGADW_LISTEN", defaultListenAddress), "HTTP listen address")
+	stateDir := flag.String("state-dir", envOrDefault("MEGADW_STATE_DIR", app.DefaultStateDir), "application state directory")
+	databasePath := flag.String("database", os.Getenv("MEGADW_DATABASE"), "SQLite database path")
+	secretKeyPath := flag.String("secret-key", os.Getenv("MEGADW_SECRET_KEY"), "application secret key path")
+	megaAPIBaseURL := flag.String("mega-api-base", os.Getenv("MEGADW_MEGA_API_BASE_URL"), "MEGA API base URL (for compatibility fixtures and routed deployments)")
+	secureCookies := flag.Bool("secure-cookies", envBool("MEGADW_SECURE_COOKIES"), "mark administrator session cookies Secure (required behind an HTTPS reverse proxy)")
 	flag.Parse()
 	if *healthcheck {
 		if err := runHealthcheck(*healthcheckURL); err != nil {
@@ -78,7 +78,7 @@ func main() {
 		Commit:        build.Commit,
 		BuildTime:     build.BuildTime,
 		SecureCookies: *secureCookies,
-		AllowedHosts:  allowedHosts(*listenAddress, os.Getenv("MEGAD_ALLOWED_HOSTS")),
+		AllowedHosts:  allowedHosts(*listenAddress, os.Getenv("MEGADW_ALLOWED_HOSTS")),
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/", apiHandler)
@@ -86,7 +86,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              *listenAddress,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		// SSE responses are intentionally long-lived. Handler-level bounded
@@ -101,7 +101,7 @@ func main() {
 		slog.Error("open HTTP listener", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("megad listening", "address", listener.Addr().String())
+	slog.Info("megadw listening", "address", listener.Addr().String())
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.Serve(listener)
@@ -143,6 +143,16 @@ func main() {
 		}
 		_ = application.Close()
 	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+		writer.Header().Set("Referrer-Policy", "no-referrer")
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(writer, request)
+	})
 }
 
 func runHealthcheck(endpoint string) error {

@@ -1,6 +1,6 @@
-# MEGA Downloader (`megad`)
+# megadw (`megadw`)
 
-MEGA Downloader is a single-process Go application with a client-rendered
+megadw is a single-process Go application with a client-rendered
 React web interface for resumable public MEGA file and folder downloads. The
 production artifact is one Go binary with the frontend embedded in it. Node.js,
 Vite+, test runners, and Java are build/test tools only; none is required at
@@ -19,7 +19,7 @@ proxies.
 > service only the filesystem access it needs, and do not expose it directly
 > to the public internet.
 
-## Why `megad`?
+## Why `megadw`?
 
 - One self-contained production process serves both the API and web UI; Node.js
   and Java remain build-time tools only.
@@ -60,7 +60,7 @@ make build
 ```
 
 `make build` builds the React assets, copies them into the `go:embed` tree, and
-creates `dist/megad`. Release builds set version, commit, and UTC build-time
+creates `dist/megadw`. Release builds set version, commit, and UTC build-time
 metadata through linker flags; the values are available from
 `GET /api/v1/version`.
 
@@ -95,11 +95,11 @@ MEGADW_LIVE_MEGA_URL='https://mega.nz/file/...' make test-live
 ## Local operation
 
 ```bash
-./dist/megad
+./dist/megadw
 ```
 
 The default listener is `127.0.0.1:8080`. Open `/setup` on first launch and
-create the local administrator. Application state defaults to `/var/lib/megad`.
+create the local administrator. Application state defaults to `/var/lib/megadw`.
 Transfer storage has no default: both roots start empty and downloads remain
 disabled until `incompleteRoot` and `completeRoot` are explicitly configured
 in Settings. The roots may be any valid absolute paths selected by the
@@ -109,17 +109,24 @@ job paths.
 
 Keep the state directory separate from transfer storage. The incomplete and
 complete roots must remain on the same filesystem because completion is a
-single atomic rename; a cross-filesystem configuration is rejected at
-finalization rather than copied.
+single atomic rename. Settings validation creates missing roots, verifies that
+the service identity can write them, and rejects a cross-filesystem pair before
+a transfer is accepted.
+
+Speed limits, retry policy, checkpoint policy, read-idle timeout, and workers
+per file apply to new work after saving. Restart the service gracefully after
+changing global concurrency or connect/response-header timeouts, whose resource
+owners are built once at process startup. Existing jobs always retain their
+persisted transfer roots and segment layout.
 
 For an unprivileged local run, set `-state-dir`, `-database`, and
-`-secret-key` to writable paths. `MEGAD_LISTEN`, `MEGAD_STATE_DIR`,
-`MEGAD_DATABASE`, and `MEGAD_SECRET_KEY` are equivalent environment overrides.
+`-secret-key` to writable paths. `MEGADW_LISTEN`, `MEGADW_STATE_DIR`,
+`MEGADW_DATABASE`, and `MEGADW_SECRET_KEY` are equivalent environment overrides.
 When an HTTPS reverse proxy is the browser entry point, set
-`MEGAD_SECURE_COOKIES=true` (or pass `-secure-cookies`) so the administrator
+`MEGADW_SECURE_COOKIES=true` (or pass `-secure-cookies`) so the administrator
 session cookie is never sent over plain HTTP. The listener address and local
 interface addresses are allowed automatically; add a reverse-proxy DNS name
-with `MEGAD_ALLOWED_HOSTS=downloads.example.test` (comma-separated for more
+with `MEGADW_ALLOWED_HOSTS=downloads.example.test` (comma-separated for more
 than one). Requests with any other browser `Host` are rejected on unsafe
 methods, and `X-Forwarded-*` headers are not trusted.
 `-mega-api-base` exists for deterministic compatibility fixtures and routed
@@ -138,15 +145,18 @@ Copy the checked-in example, replace every placeholder with an operator-chosen
 path and immutable image digest, then validate and start it:
 
 ```bash
-cp packaging/megad.compose.env.example .env
+cp packaging/megadw.compose.env.example .env
 $EDITOR .env
 docker compose -f compose.yaml config --quiet
 docker compose -f compose.yaml up -d
 ```
 
-Set `MEGAD_ALLOWED_HOSTS` to the exact browser-visible host and port. The
-example uses `127.0.0.1:8080`; update it when changing `MEGAD_PORT` or placing
-the service behind a named reverse proxy.
+Set `MEGADW_ALLOWED_HOSTS` to the exact browser-visible host and port. The
+example uses `127.0.0.1:8080`; update it when changing `MEGADW_PORT` or placing
+the service behind a named reverse proxy. Also set
+`MEGADW_SECURE_COOKIES=true` when TLS terminates at that proxy; this both marks
+the administrator cookie Secure and permits same-host HTTPS origins without
+trusting forwarded headers.
 
 The Compose example uses separate host paths for state and transfer storage.
 It mounts one transfer parent into the container so the two configured roots
@@ -162,24 +172,31 @@ shutdown. Replacing the image leaves the state and transfer host paths intact,
 and persisted settings and job roots are read with the same semantics as a
 native installation. `docker compose` never requires privileged mode.
 
+For a consistent backup, stop the service cleanly and archive the complete
+state directory, including `megadw.sqlite3`, any SQLite `-wal`/`-shm` files,
+and `secret.key`. The database and key are one restore unit: losing the key
+makes encrypted link, account, and proxy material unrecoverable. Back up the
+transfer roots separately according to their size and retention policy, then
+restore them at the same container-visible paths before starting the service.
+
 ## Native Linux binary + systemd (secondary)
 
-The supported native service is `packaging/megad.service`:
+The supported native service is `packaging/megadw.service`:
 
 ```bash
 groupadd --system media
-useradd --system --home-dir /var/lib/megad --no-create-home --shell /usr/sbin/nologin --gid media megad
-install -d -o megad -g media -m 0750 /var/lib/megad
-install -d -m 0755 /etc/megad
-install -m 0644 packaging/megad.env.example /etc/megad/megad.env
-install -m 0755 dist/megad /usr/local/bin/megad
-install -m 0644 packaging/megad.service /etc/systemd/system/megad.service
+useradd --system --home-dir /var/lib/megadw --no-create-home --shell /usr/sbin/nologin --gid media megadw
+install -d -o megadw -g media -m 0750 /var/lib/megadw
+install -d -m 0755 /etc/megadw
+install -m 0644 packaging/megadw.env.example /etc/megadw/megadw.env
+install -m 0755 dist/megadw /usr/local/bin/megadw
+install -m 0644 packaging/megadw.service /etc/systemd/system/megadw.service
 systemctl daemon-reload
-systemctl enable --now megad
+systemctl enable --now megadw
 ```
 
-The unit runs as `megad:media`, stores its secret and SQLite database under
-`/var/lib/megad`, and starts safely with transfer roots unconfigured. It keeps
+The unit runs as `megadw:media`, stores its secret and SQLite database under
+`/var/lib/megadw`, and starts safely with transfer roots unconfigured. It keeps
 outbound networking enabled, but uses `NoNewPrivileges`, private temporary
 storage, strict system protection, no ambient or bounding capabilities, kernel
 protection, namespace restrictions, and a 20-second stop timeout. Inspect the
@@ -190,10 +207,10 @@ the service in a systemd drop-in. For example, replace the placeholders below
 with the exact configured roots:
 
 ```ini
-# systemctl edit megad
+# systemctl edit megadw
 [Service]
 ReadWritePaths=
-ReadWritePaths=/var/lib/megad /absolute/path/chosen-by-operator/partial /absolute/path/chosen-by-operator/complete
+ReadWritePaths=/var/lib/megadw /absolute/path/chosen-by-operator/partial /absolute/path/chosen-by-operator/complete
 ```
 
 The drop-in is the native equivalent of the Compose bind-mount permission
@@ -207,7 +224,7 @@ directory.
 An LXC or Proxmox guest is an optional host for the native service. Prefer the
 native systemd installation above; running Docker inside LXC additionally
 requires an intentionally configured nesting-capable guest and is not needed
-by MEGA Downloader itself.
+by megadw itself.
 
 Bind-mount one host transfer parent into the guest so incomplete and complete
 remain on the same filesystem. For example, after stopping container `101`, a
@@ -220,9 +237,9 @@ pct set 101 -mp0 /host/path/chosen-by-operator/transfer,mp=/guest/path/transfer
 Create the two roots below that guest-visible parent, configure those exact
 paths in Settings, and add them to the native systemd `ReadWritePaths` drop-in.
 For an unprivileged LXC, map or ACL the host ownership so the guest's
-`megad:media` identity can write the mount; do not solve permission errors with
+`megadw:media` identity can write the mount; do not solve permission errors with
 world-writable directories or a privileged application container. State may
-remain inside the guest at `/var/lib/megad`, or be mounted separately for the
+remain inside the guest at `/var/lib/megadw`, or be mounted separately for the
 operator's backup policy. No fixed host or guest transfer path is required.
 
 ## Resource profiles and release benchmark
@@ -258,11 +275,11 @@ not fabricated constrained-profile results.
 
 | Profile | Workers | Throughput | Max RSS | CPU / target CPUs | Max FDs | Max goroutines | SQLite writes/s | Checkpoints/s | Temp overhead |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| small | 1 | 47.93 MiB/s | 22.70 MiB | 4.96% | 13 | 11 | 0.562 | 0.562 | 0.75 MiB |
-| small | 4 | 155.41 MiB/s | 21.45 MiB | 16.39% | 16 | 18 | 0.607 | 0.607 | 0.39 MiB |
-| small | 8 | 245.29 MiB/s | 27.04 MiB | 26.83% | 20 | 30 | 0.958 | 0.958 | 0.30 MiB |
-| large | 8 | 244.43 MiB/s | 27.85 MiB | 15.75% | 20 | 30 | 0.955 | 0.955 | 0.30 MiB |
-| large | 12 | 280.66 MiB/s | 27.36 MiB | 18.36% | 24 | 42 | 1.096 | 1.096 | 0.32 MiB |
+| small | 1 | 47.94 MiB/s | 21.24 MiB | 4.96% | 14 | 12 | 0.562 | 0.562 | 0.36 MiB |
+| small | 4 | 154.94 MiB/s | 24.29 MiB | 16.95% | 17 | 18 | 0.605 | 0.605 | 0.30 MiB |
+| small | 8 | 241.73 MiB/s | 22.91 MiB | 27.38% | 21 | 30 | 0.944 | 0.944 | 0.30 MiB |
+| large | 8 | 245.47 MiB/s | 24.22 MiB | 15.82% | 21 | 30 | 0.959 | 0.959 | 0.30 MiB |
+| large | 12 | 293.92 MiB/s | 24.86 MiB | 18.37% | 25 | 42 | 1.148 | 1.148 | 0.84 MiB |
 
 Defaults remain the plan's safe values: 4 workers per file, 2 active files,
 and 8 global workers. Change them only when the complete matrix demonstrates

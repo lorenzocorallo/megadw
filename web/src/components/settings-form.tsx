@@ -136,6 +136,9 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
           <NumberField
             label={t("settings.segmentSizeBytes")}
             value={value.downloads.segmentSizeBytes}
+            min={1_048_576}
+            max={67_108_864}
+            step={1_048_576}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -146,6 +149,8 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
           <NumberField
             label={t("settings.workersPerFile")}
             value={value.downloads.workersPerFile}
+            min={1}
+            max={16}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -156,6 +161,8 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
           <NumberField
             label={t("settings.maxActiveFiles")}
             value={value.downloads.maxActiveFiles}
+            min={1}
+            max={16}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -166,6 +173,8 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
           <NumberField
             label={t("settings.maxGlobalWorkers")}
             value={value.downloads.maxGlobalWorkers}
+            min={1}
+            max={64}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -176,6 +185,7 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
           <NumberField
             label={t("settings.globalSpeedLimit")}
             value={value.downloads.globalSpeedLimitBytesPerSecond}
+            min={0}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -184,8 +194,24 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
             }
           />
           <NumberField
+            label={t("settings.perJobSpeedLimit")}
+            value={value.downloads.perJobDefaultLimitBytesPerSecond}
+            min={0}
+            onChange={(next) =>
+              update((current) => ({
+                ...current,
+                downloads: {
+                  ...current.downloads,
+                  perJobDefaultLimitBytesPerSecond: next,
+                },
+              }))
+            }
+          />
+          <NumberField
             label={t("settings.checkpointInterval")}
             value={value.downloads.checkpointIntervalMs}
+            min={100}
+            max={60_000}
             onChange={(next) =>
               update((current) => ({
                 ...current,
@@ -194,12 +220,66 @@ export function SettingsForm({ section }: { section: "general" | "downloads" | "
             }
           />
           <NumberField
+            label={t("settings.checkpointBytes")}
+            value={value.downloads.checkpointBytes}
+            min={1_048_576}
+            max={1_099_511_627_776}
+            step={1_048_576}
+            onChange={(next) =>
+              update((current) => ({
+                ...current,
+                downloads: { ...current.downloads, checkpointBytes: next },
+              }))
+            }
+          />
+          <NumberField
             label={t("settings.normalRetryLimit")}
             value={value.downloads.normalRetryLimit}
+            min={0}
+            max={20}
             onChange={(next) =>
               update((current) => ({
                 ...current,
                 downloads: { ...current.downloads, normalRetryLimit: next },
+              }))
+            }
+          />
+          <h2 className="col-span-full border-t border-slate-800 pt-5 text-base font-semibold text-slate-100">
+            {t("settings.networkLimits")}
+          </h2>
+          <NumberField
+            label={t("settings.connectTimeout")}
+            value={value.network.connectTimeoutSeconds}
+            min={1}
+            max={300}
+            onChange={(next) =>
+              update((current) => ({
+                ...current,
+                network: { ...current.network, connectTimeoutSeconds: next },
+              }))
+            }
+          />
+          <NumberField
+            label={t("settings.responseHeaderTimeout")}
+            value={value.network.responseHeaderTimeoutSeconds}
+            min={1}
+            max={600}
+            onChange={(next) =>
+              update((current) => ({
+                ...current,
+                network: { ...current.network, responseHeaderTimeoutSeconds: next },
+              }))
+            }
+          />
+          <NumberField
+            label={t("settings.readIdleTimeout")}
+            value={value.network.readIdleTimeoutSeconds}
+            min={1}
+            max={3600}
+            onChange={(next) =>
+              update((current) => ({
+                ...current,
+                network: { ...current.network, readIdleTimeoutSeconds: next },
               }))
             }
           />
@@ -263,10 +343,16 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function NumberField({
   label,
   value,
+  min,
+  max,
+  step,
   onChange,
 }: {
   label: string;
   value: number;
+  min?: number;
+  max?: number;
+  step?: number;
   onChange: (value: number) => void;
 }) {
   return (
@@ -275,6 +361,9 @@ function NumberField({
         className={inputClass}
         type="number"
         value={value}
+        min={min}
+        max={max}
+        step={step}
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </Field>

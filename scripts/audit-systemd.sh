@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-unit=${1:-packaging/megad.service}
+unit=${1:-packaging/megadw.service}
 test -f "$unit"
 
-required='User=megad
+required='User=megadw
 Group=media
-StateDirectory=megad
+StateDirectory=megadw
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=20s
@@ -21,7 +21,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/var/lib/megad'
+ReadWritePaths=/var/lib/megadw'
 
 printf '%s\n' "$required" | while IFS= read -r line; do
 	if ! grep -Fqx "$line" "$unit"; then

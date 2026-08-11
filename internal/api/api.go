@@ -142,7 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/proxies/{id}", s.withAuth(s.handleDeleteProxy))
 	mux.HandleFunc("GET /api/v1/events", s.withAuth(s.handleEvents))
 
-	return sameOrigin(s.allowedHosts, mux)
+	return sameOrigin(s.allowedHosts, s.config.SecureCookies, mux)
 }
 
 func (s *Server) withAuth(handler func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc {
@@ -175,7 +175,11 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 			transferPathsConfigured = value.Paths.Configured()
 		}
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{
+	statusCode := http.StatusOK
+	if status != "ok" {
+		statusCode = http.StatusServiceUnavailable
+	}
+	writeJSON(writer, statusCode, map[string]any{
 		"status":                  status,
 		"version":                 s.config.Version,
 		"database":                database,
@@ -366,9 +370,22 @@ func (s *Server) handlePutSettings(writer http.ResponseWriter, request *http.Req
 	if !decodeJSON(writer, request, &value, maxSettingsBody) {
 		return
 	}
+	if err := value.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, "settings_invalid", err.Error(), nil)
+		return
+	}
+	if value.Paths.Configured() {
+		if err := validateTransferRoots(value.Paths); err != nil {
+			writeError(writer, http.StatusBadRequest, "settings_invalid", err.Error(), nil)
+			return
+		}
+	}
 	if err := s.settings.Update(request.Context(), value); err != nil {
 		writeError(writer, http.StatusBadRequest, "settings_invalid", err.Error(), nil)
 		return
+	}
+	if s.downloads != nil {
+		s.downloads.ApplySettings(value)
 	}
 	s.events.Publish(events.Event{Name: events.SettingsUpdated, Timestamp: time.Now().UTC(), Data: map[string]any{"settings": value}})
 	writeJSON(writer, http.StatusOK, value)
@@ -866,12 +883,8 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusConflict, "transfer_paths_unconfigured", "configure both transfer roots before creating a download", nil)
 		return
 	}
-	if err := validateTransferRoot(currentSettings.Paths.CompleteRoot); err != nil {
-		writeError(writer, http.StatusBadRequest, "settings_invalid", "configured complete root is invalid", nil)
-		return
-	}
-	if err := validateTransferRoot(currentSettings.Paths.IncompleteRoot); err != nil {
-		writeError(writer, http.StatusBadRequest, "settings_invalid", "configured incomplete root is invalid", nil)
+	if err := validateTransferRoots(currentSettings.Paths); err != nil {
+		writeError(writer, http.StatusBadRequest, "settings_invalid", err.Error(), nil)
 		return
 	}
 	if input.AccountID != "" {
@@ -1005,12 +1018,43 @@ func (s *Server) handleCreateDownload(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusCreated, record)
 }
 
-func validateTransferRoot(path string) error {
-	root, err := fsroot.New(path)
+func validateTransferRoots(paths settings.PathsSettings) error {
+	incomplete, err := fsroot.New(paths.IncompleteRoot)
 	if err != nil {
-		return err
+		return fmt.Errorf("configured incomplete root is invalid: %w", err)
 	}
-	return root.Close()
+	defer incomplete.Close()
+	if err := incomplete.Ensure(); err != nil {
+		return fmt.Errorf("configured incomplete root is not writable: %w", err)
+	}
+	if err := incomplete.RequireWritable(); err != nil {
+		return fmt.Errorf("configured incomplete root is not writable: %w", err)
+	}
+
+	complete, err := fsroot.New(paths.CompleteRoot)
+	if err != nil {
+		return fmt.Errorf("configured complete root is invalid: %w", err)
+	}
+	defer complete.Close()
+	if err := complete.Ensure(); err != nil {
+		return fmt.Errorf("configured complete root is not writable: %w", err)
+	}
+	if err := complete.RequireWritable(); err != nil {
+		return fmt.Errorf("configured complete root is not writable: %w", err)
+	}
+
+	incompleteDevice, err := incomplete.DeviceID()
+	if err != nil {
+		return fmt.Errorf("inspect incomplete root filesystem: %w", err)
+	}
+	completeDevice, err := complete.DeviceID()
+	if err != nil {
+		return fmt.Errorf("inspect complete root filesystem: %w", err)
+	}
+	if incompleteDevice != completeDevice {
+		return fmt.Errorf("incomplete and complete roots must be on the same filesystem")
+	}
+	return nil
 }
 
 func (s *Server) handleListDownloads(writer http.ResponseWriter, request *http.Request, _ auth.Principal) {
@@ -1359,10 +1403,10 @@ func writeError(writer http.ResponseWriter, status int, code, message string, de
 	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"code": code, "message": message, "details": details}})
 }
 
-func sameOrigin(allowedHosts map[string]struct{}, next http.Handler) http.Handler {
+func sameOrigin(allowedHosts map[string]struct{}, allowHTTPSProxyOrigin bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPost || request.Method == http.MethodPut || request.Method == http.MethodPatch || request.Method == http.MethodDelete {
-			if !requestHostAllowed(request, allowedHosts) || !requestHasSameOrigin(request) {
+			if !requestHostAllowed(request, allowedHosts) || !requestHasSameOrigin(request, allowHTTPSProxyOrigin) {
 				writeError(writer, http.StatusForbidden, "origin_forbidden", "request origin is not allowed", nil)
 				return
 			}
@@ -1386,7 +1430,7 @@ func normalizeHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 }
 
-func requestHasSameOrigin(request *http.Request) bool {
+func requestHasSameOrigin(request *http.Request, allowHTTPSProxyOrigin bool) bool {
 	origin := request.Header.Get("Origin")
 	if origin == "" {
 		// Non-browser clients do not send Origin. Host is still checked by the
@@ -1398,11 +1442,11 @@ func requestHasSameOrigin(request *http.Request) bool {
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
-	if parsed.Host != request.Host {
+	if normalizeHost(parsed.Host) != normalizeHost(request.Host) {
 		return false
 	}
 	if request.TLS != nil {
 		return parsed.Scheme == "https"
 	}
-	return parsed.Scheme == "http"
+	return parsed.Scheme == "http" || allowHTTPSProxyOrigin && parsed.Scheme == "https"
 }

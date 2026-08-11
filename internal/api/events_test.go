@@ -22,7 +22,7 @@ func TestAuthenticatedSSEStreamsEventsAndDisconnectsCleanly(t *testing.T) {
 	stateDir := t.TempDir()
 	application, err := app.Open(context.Background(), app.Config{
 		StateDir:       stateDir,
-		DatabasePath:   filepath.Join(stateDir, "megad.sqlite3"),
+		DatabasePath:   filepath.Join(stateDir, "megadw.sqlite3"),
 		SecretKeyPath:  filepath.Join(stateDir, "secret.key"),
 		MegaAPIBaseURL: fixture.APIBaseURL(),
 		HTTPClient:     fixture.HTTPClient(),

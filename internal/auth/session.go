@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -13,9 +14,15 @@ import (
 )
 
 const (
-	SessionCookieName = "megad_session"
+	SessionCookieName = "megadw_session"
 	SessionTTL        = 24 * time.Hour
 )
+
+const dummyPasswordRecord = "argon2id-v1$65536$3$2$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+// Argon2 is intentionally memory-hard. Bound unauthenticated password work so
+// concurrent login attempts cannot exhaust a small homelab host.
+var passwordWorkSlots = make(chan struct{}, 2)
 
 type Manager struct {
 	DB            *store.DB
@@ -45,7 +52,11 @@ func (m *Manager) Setup(ctx context.Context, username, password string) (Princip
 	if err := ValidateUsername(username); err != nil {
 		return Principal{}, "", err
 	}
+	if err := acquirePasswordWork(ctx); err != nil {
+		return Principal{}, "", err
+	}
 	hash, err := HashPassword(password)
+	releasePasswordWork()
 	if err != nil {
 		return Principal{}, "", err
 	}
@@ -62,10 +73,20 @@ func (m *Manager) Setup(ctx context.Context, username, password string) (Princip
 
 func (m *Manager) Login(ctx context.Context, username, password string) (Principal, string, error) {
 	user, err := m.DB.UserByUsername(ctx, username)
-	if err != nil {
+	found := err == nil
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return Principal{}, "", err
 	}
-	if !VerifyPassword(password, user.PasswordHash) {
+	hash := user.PasswordHash
+	if !found {
+		hash = []byte(dummyPasswordRecord)
+	}
+	if err := acquirePasswordWork(ctx); err != nil {
+		return Principal{}, "", err
+	}
+	verified := VerifyPassword(password, hash)
+	releasePasswordWork()
+	if !found || !verified {
 		return Principal{}, "", fmt.Errorf("invalid username or password")
 	}
 	token, err := m.createSession(ctx, user.ID)
@@ -86,10 +107,29 @@ func (m *Manager) createSession(ctx context.Context, userID string) (string, err
 	if ttl <= 0 {
 		ttl = SessionTTL
 	}
+	if err := m.DB.DeleteExpiredSessions(ctx, now); err != nil {
+		return "", err
+	}
 	if err := m.DB.InsertSession(ctx, store.SessionRecord{UserID: userID, Digest: digest[:], CreatedAt: now, ExpiresAt: now.Add(ttl)}); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+func acquirePasswordWork(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case passwordWorkSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releasePasswordWork() {
+	<-passwordWorkSlots
 }
 
 func (m *Manager) Principal(ctx context.Context, request *http.Request) (Principal, bool) {

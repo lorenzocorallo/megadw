@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,23 @@ func TestHealthcheckRejectsDegradedAPIEnvelope(t *testing.T) {
 	defer server.Close()
 	if err := runHealthcheck(server.URL); err == nil {
 		t.Fatal("degraded response accepted")
+	}
+}
+
+func TestSecurityHeadersProtectApplicationResponses(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://example.test/", nil))
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Referrer-Policy":         "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := response.Header().Get(header); !strings.Contains(got, want) {
+			t.Fatalf("%s = %q, want it to contain %q", header, got, want)
+		}
 	}
 }

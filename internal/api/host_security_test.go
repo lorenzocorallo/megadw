@@ -27,3 +27,21 @@ func TestUnsafeRequestRejectsAttackerControlledMatchingOriginAndHost(t *testing.
 		t.Fatal("configured listener Host was rejected")
 	}
 }
+
+func TestUnsafeRequestAcceptsExplicitHTTPSReverseProxyOrigin(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://downloads.example.test/api/v1/auth/setup", strings.NewReader(`{}`))
+	request.Host = "downloads.example.test"
+	request.Header.Set("Origin", "https://downloads.example.test")
+
+	insecure := httptest.NewRecorder()
+	New(Config{AllowedHosts: []string{"downloads.example.test"}}).ServeHTTP(insecure, request.Clone(request.Context()))
+	if insecure.Code != http.StatusForbidden {
+		t.Fatalf("HTTPS proxy origin without secure-cookie opt-in status = %d, want 403", insecure.Code)
+	}
+
+	secure := httptest.NewRecorder()
+	New(Config{AllowedHosts: []string{"downloads.example.test"}, SecureCookies: true}).ServeHTTP(secure, request.Clone(request.Context()))
+	if secure.Code == http.StatusForbidden {
+		t.Fatal("explicit HTTPS reverse-proxy origin was rejected")
+	}
+}

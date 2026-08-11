@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/lorenzocorallo/megadw/internal/auth"
 	"github.com/lorenzocorallo/megadw/internal/store"
@@ -19,7 +20,7 @@ func TestPasswordAndSessionRoundTrip(t *testing.T) {
 	if auth.VerifyPassword("wrong password", hash) || !auth.VerifyPassword("correct horse battery", hash) {
 		t.Fatal("password verification result is incorrect")
 	}
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "megad.sqlite3"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "megadw.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +49,31 @@ func TestPasswordAndSessionRoundTrip(t *testing.T) {
 	got, ok := manager.Principal(context.Background(), request)
 	if !ok || got.ID != principal.ID {
 		t.Fatalf("principal = %#v, authenticated = %v", got, ok)
+	}
+}
+
+func TestCreatingSessionPrunesExpiredSessions(t *testing.T) {
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "megadw.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	manager := auth.NewManager(db)
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	manager.Now = func() time.Time { return now }
+	if _, _, err := manager.Setup(context.Background(), "admin", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(auth.SessionTTL + time.Minute)
+	if _, _, err := manager.Login(context.Background(), "admin", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("stored sessions = %d, want only the new unexpired session", count)
 	}
 }
 

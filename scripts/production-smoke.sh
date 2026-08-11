@@ -2,11 +2,11 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-BINARY=${1:-$ROOT/dist/megad}
+BINARY=${1:-$ROOT/dist/megadw}
 PORT=${MEGADW_SMOKE_PORT:-$((18080 + ($$ % 1000)))}
 BASE_URL="http://127.0.0.1:$PORT"
 RUN_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/megadw-production-smoke.XXXXXX")
-LOG_FILE="$RUN_ROOT/megad.log"
+LOG_FILE="$RUN_ROOT/megadw.log"
 PID=""
 
 cleanup() {
@@ -34,7 +34,7 @@ test -x "$BINARY"
 "$BINARY" \
 	-listen "127.0.0.1:$PORT" \
 	-state-dir "$RUN_ROOT/state" \
-	-database "$RUN_ROOT/state/megad.sqlite3" \
+	-database "$RUN_ROOT/state/megadw.sqlite3" \
 	-secret-key "$RUN_ROOT/state/secret.key" \
 	>"$LOG_FILE" 2>&1 &
 PID=$!

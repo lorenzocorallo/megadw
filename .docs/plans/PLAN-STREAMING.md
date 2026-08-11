@@ -90,7 +90,7 @@ max ranges/request:          4
 
 Cache entries contain decrypted plaintext bytes. Keep them process-memory-only by default, account for them in the global resource budget, wipe references promptly on eviction/session teardown, and never log cache contents.
 
-Optional disk cache may be added later under `/var/cache/megad/stream`, but it must use an LRU size cap and must not silently become a permanent second copy of streamed files.
+Optional disk cache may be added later under `/var/cache/megadw/stream`, but it must use an LRU size cap and must not silently become a permanent second copy of streamed files.
 
 ## Quota behavior
 

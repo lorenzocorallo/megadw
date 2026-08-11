@@ -1,4 +1,4 @@
-// Package buildinfo contains the release metadata compiled into megad.
+// Package buildinfo contains the release metadata compiled into megadw.
 //
 // The defaults deliberately identify development builds. Release builds set
 // these variables with -ldflags so the binary and its version endpoint can be

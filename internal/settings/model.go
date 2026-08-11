@@ -104,6 +104,9 @@ func (s Settings) Validate() error {
 	}
 	checkRoot("paths.incompleteRoot", s.Paths.IncompleteRoot)
 	checkRoot("paths.completeRoot", s.Paths.CompleteRoot)
+	if (s.Paths.IncompleteRoot == "") != (s.Paths.CompleteRoot == "") {
+		problems = append(problems, "paths.incompleteRoot and paths.completeRoot must both be empty or both be configured")
+	}
 
 	if s.Downloads.SegmentSizeBytes < 1<<20 || s.Downloads.SegmentSizeBytes > 64<<20 {
 		problems = append(problems, "downloads.segmentSizeBytes must be between 1048576 and 67108864")

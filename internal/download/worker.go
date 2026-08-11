@@ -150,9 +150,7 @@ type readIdleBody struct {
 }
 
 func newReadIdleBody(source io.ReadCloser, timeout time.Duration) *readIdleBody {
-	body := &readIdleBody{source: source, timeout: timeout}
-	body.resetTimer()
-	return body
+	return &readIdleBody{source: source, timeout: timeout}
 }
 
 func (b *readIdleBody) Read(buffer []byte) (int, error) {

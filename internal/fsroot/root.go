@@ -114,6 +114,43 @@ func (r *Root) Ensure() error {
 	return unix.Close(fd)
 }
 
+// RequireWritable verifies that the process can create entries below the
+// anchored root. It does not create a probe file and therefore remains safe to
+// call during settings validation.
+func (r *Root) RequireWritable() error {
+	if r == nil {
+		return fmt.Errorf("%w: root is nil", ErrInvalidPath)
+	}
+	fd, err := r.rootDescriptor(false)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if err := unix.Faccessat(fd, ".", unix.W_OK|unix.X_OK, unix.AT_EACCESS); err != nil {
+		return wrapPathError("check root access", r.path, err)
+	}
+	return nil
+}
+
+// DeviceID returns the filesystem device of the anchored root descriptor.
+// Comparing this value before a transfer starts detects configurations that
+// cannot support the required atomic final rename.
+func (r *Root) DeviceID() (uint64, error) {
+	if r == nil {
+		return 0, fmt.Errorf("%w: root is nil", ErrInvalidPath)
+	}
+	fd, err := r.rootDescriptor(false)
+	if err != nil {
+		return 0, err
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return 0, fmt.Errorf("stat root descriptor: %w", err)
+	}
+	return uint64(stat.Dev), nil
+}
+
 // MkdirAll creates relative and all missing parents through held directory
 // descriptors. Existing symlinks are rejected.
 func (r *Root) MkdirAll(relative string, perm os.FileMode) error {

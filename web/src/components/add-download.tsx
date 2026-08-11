@@ -25,11 +25,20 @@ export function AddDownload() {
   const [startImmediately, setStartImmediately] = useState(true);
   const [accountId, setAccountId] = useState("");
   const [proxyId, setProxyId] = useState("");
+  const [defaultsApplied, setDefaultsApplied] = useState(false);
   const [resolved, setResolved] = useState<ResolvedDownload | null>(null);
   const [message, setMessage] = useState("");
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: listAccounts, enabled: open });
   const proxies = useQuery({ queryKey: ["proxies"], queryFn: listProxies, enabled: open });
-  currentResolveSource.current = `${url}\u0000${accountId}`;
+  currentResolveSource.current = `${url}\u0000${accountId}\u0000${proxyId}`;
+
+  useEffect(() => {
+    if (!open || defaultsApplied || accounts.isPending || proxies.isPending) return;
+    setAccountId(accounts.data?.find((account) => account.defaultForDownloads)?.id ?? "");
+    setProxyId(proxies.data?.find((proxy) => proxy.enabled && proxy.defaultForDownloads)?.id ?? "");
+    setResolved(null);
+    setDefaultsApplied(true);
+  }, [accounts.data, accounts.isPending, defaultsApplied, open, proxies.data, proxies.isPending]);
 
   useEffect(() => {
     if (!open) return;
@@ -68,14 +77,15 @@ export function AddDownload() {
   }, [open]);
 
   const resolveMutation = useMutation({
-    mutationFn: (source: { url: string; accountId: string; key: string }) =>
-      resolveDownload(source.url, source.accountId),
+    mutationFn: (source: { url: string; accountId: string; proxyId: string; key: string }) =>
+      resolveDownload(source.url, source.accountId, source.proxyId),
     onSuccess: (value, source) => {
       if (source.key !== currentResolveSource.current) return;
       setResolved(value);
       setMessage("");
     },
-    onError: (error: Error) => {
+    onError: (error: Error, source) => {
+      if (source.key !== currentResolveSource.current) return;
       setResolved(null);
       setMessage(error instanceof APIError ? error.message : t("errors.requestFailed"));
     },
@@ -94,6 +104,8 @@ export function AddDownload() {
       setDestination("");
       setResolved(null);
       setMessage("");
+      setAccountId("");
+      setProxyId("");
       setOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["downloads"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -120,6 +132,7 @@ export function AddDownload() {
           previousFocus.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
           setOpen(true);
+          setDefaultsApplied(false);
           setMessage("");
         }}
       >
@@ -203,7 +216,10 @@ export function AddDownload() {
                     id="download-proxy"
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:ring-2 focus:ring-emerald-400"
                     value={proxyId}
-                    onChange={(event) => setProxyId(event.target.value)}
+                    onChange={(event) => {
+                      setProxyId(event.target.value);
+                      setResolved(null);
+                    }}
                   >
                     <option value="">{t("download.direct")}</option>
                     {proxies.data
@@ -257,7 +273,8 @@ export function AddDownload() {
                     resolveMutation.mutate({
                       url,
                       accountId,
-                      key: `${url}\u0000${accountId}`,
+                      proxyId,
+                      key: `${url}\u0000${accountId}\u0000${proxyId}`,
                     })
                   }
                   disabled={!url.trim() || resolveMutation.isPending}

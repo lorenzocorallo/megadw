@@ -24,6 +24,13 @@ volumes:
     target: /downloads
 ```
 
+The `state` folder contains the SQLite database, encryption key, settings, job
+history, and resume checkpoints—not downloaded file contents. A typical install
+uses a few to a few dozen MB; very large file catalogs or long job histories can
+grow into hundreds of MB or, exceptionally, GB. A small, reliable, backed-up
+SSD location is a good choice. Put `downloads` on the large disk: it holds both
+partial and completed files and needs space for the actual payloads.
+
 Then start megadw with one command:
 
 ```bash
